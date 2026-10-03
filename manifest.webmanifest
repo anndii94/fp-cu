@@ -1,0 +1,22 @@
+{
+  "name": "FP&CU",
+  "short_name": "FP&CU",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F5F7FC",
+  "theme_color": "#3657D6",
+  "lang": "es-CO",
+  "icons": [
+    {
+      "src": "./icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "./icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
