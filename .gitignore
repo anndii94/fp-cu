@@ -1,3 +1,10 @@
-private/
-*.private.json
+# Nunca subir datos reales
+privado/
+*ESTADO_REAL*
+*APERTURA*
+*HISTORICO*
+FP_CU_*
+fpcu-backup-*.json
+fpcu-respaldo-*.json
+*.xlsx
 .DS_Store
