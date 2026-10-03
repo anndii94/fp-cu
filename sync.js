@@ -1,112 +1,317 @@
-(() => {
-'use strict';
-const C=window.FPCU_CONFIG||{};
-const SESSION_KEY='fpcu_auth_session_v1', META_KEY='fpcu_sync_meta_v1', QUEUE_KEY='fpcu_sync_queue_v1', LAST_KEY='fpcu_sync_last_v1', DEVICE_KEY='fpcu_device_id_v1';
-let syncing=false,timer=null,booted=false;
-const cfgReady=()=>C.APPS_SCRIPT_URL&&!String(C.APPS_SCRIPT_URL).startsWith('REEMPLAZAR_');
-const jget=(k,fallback)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):fallback}catch{return fallback}};
-const jset=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
-const deviceId=()=>{let x=localStorage.getItem(DEVICE_KEY);if(!x){x='dev-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10);localStorage.setItem(DEVICE_KEY,x)}return x};
-const session=()=>localStorage.getItem(SESSION_KEY)||'';
-const setSession=v=>v?localStorage.setItem(SESSION_KEY,v):localStorage.removeItem(SESSION_KEY);
-const hash=s=>{let h=5381;for(let i=0;i<s.length;i++)h=((h<<5)+h)^s.charCodeAt(i);return (h>>>0).toString(36)};
-const now=()=>Date.now();
-async function fetchTimeout(url,opts={},ms=20000){const ac=new AbortController(),id=setTimeout(()=>ac.abort(),ms);try{return await fetch(url,{...opts,signal:ac.signal,redirect:'follow'})}finally{clearTimeout(id)}}
-async function post(body){
-  const r=await fetchTimeout(C.APPS_SCRIPT_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(body)});
-  const txt=await r.text();let j;try{j=JSON.parse(txt)}catch{throw new Error('Respuesta no valida del servidor')}
-  if(!j.ok)throw new Error(j.error||'Error del servidor');return j
-}
-function setStatus(text,kind=''){
-  let b=document.getElementById('syncFloat');if(!b){b=document.createElement('div');b.id='syncFloat';b.className='sync-float';document.body.appendChild(b)}b.className='sync-float '+kind;b.textContent=text;
-  const s=document.getElementById('syncSettingsStatus');if(s)s.textContent=text
-}
-function gate(){
-  let g=document.getElementById('fpcuAuthGate');if(g)return g;
-  g=document.createElement('div');g.id='fpcuAuthGate';g.className='auth-gate';
-  g.innerHTML=`<div class="auth-card"><h1>FP&amp;CU</h1><p>La pagina no contiene tus datos financieros. Escribe la <strong>clave privada</strong> de FP&amp;CU para abrir y sincronizar este dispositivo.</p><div class="auth-key-row"><input id="fpcuPrivateKey" type="password" autocomplete="current-password" autocapitalize="off" spellcheck="false" placeholder="Clave privada FP&CU"><button id="fpcuLoginBtn" class="btn primary" type="button">Abrir FP&amp;CU</button></div><label class="auth-show"><input id="fpcuShowKey" type="checkbox"> Mostrar clave</label><div id="authStatus" class="auth-status">Comprobando configuracion...</div><div class="auth-help">La clave nunca se guarda en GitHub. El servidor conserva solamente una huella criptografica y, tras validarla, entrega una sesion temporal.</div></div>`;
-  document.body.appendChild(g);
-  const input=g.querySelector('#fpcuPrivateKey'),btn=g.querySelector('#fpcuLoginBtn'),show=g.querySelector('#fpcuShowKey');
-  btn.onclick=()=>loginWithPrivateKey();input.addEventListener('keydown',e=>{if(e.key==='Enter')loginWithPrivateKey()});show.onchange=()=>input.type=show.checked?'text':'password';
-  return g
-}
-function showGate(msg){const g=gate();g.classList.remove('hidden');const s=document.getElementById('authStatus');if(s)s.textContent=msg||'Escribe tu clave privada para continuar.';setTimeout(()=>document.getElementById('fpcuPrivateKey')?.focus(),50)}
-function hideGate(){gate().classList.add('hidden')}
-async function loginWithPrivateKey(){
-  const input=document.getElementById('fpcuPrivateKey'),btn=document.getElementById('fpcuLoginBtn'),s=document.getElementById('authStatus'),accessKey=(input?.value||'').trim();
-  if(!accessKey){if(s)s.textContent='Escribe la clave privada.';return}
-  if(btn)btn.disabled=true;if(s)s.textContent='Verificando clave...';
-  try{const j=await post({action:'login',accessKey,device:deviceId()});setSession(j.session);if(input)input.value='';if(s)s.textContent='Acceso correcto.';hideGate();await syncNow(true)}catch(e){setSession('');if(s)s.textContent='No se pudo abrir: '+friendlyError(e.message)}finally{if(btn)btn.disabled=false}
-}
-function friendlyError(m){if(/clave|access/i.test(m))return 'la clave privada no coincide.';if(/fetch|network|Failed/i.test(m))return 'no se pudo contactar el servidor. Revisa internet y la URL de Apps Script.';return m}
-function flatAll(){
-  const m=new Map(),add=(k,v)=>m.set(k,JSON.stringify(v));
-  add('core',{schema_version:state.schema_version,project:'FP&CU',currency:state.currency,timezone:state.timezone,live_start_date:state.live_start_date,account:state.account,monthly:{first_cycle:state.monthly?.first_cycle||'2026-10',default_income_label:state.monthly?.default_income_label||'Sueldo',default_income_amount:state.monthly?.default_income_amount||0},preferences:state.preferences||{},meta:{...(state.meta||{}),initialized:!!state.meta?.initialized}});
-  for(const x of state.fixed_expenses||[])add('fixed:'+x.id,x);for(const x of state.pockets||[])add('pocket:'+x.id,x);for(const x of state.pocket_movements||[])add('pocketmov:'+x.id,x);for(const x of state.receivables||[])add('receivable:'+x.id,x);for(const x of state.transactions||[])add('tx:'+x.id,x);for(const x of state.debts||[])add('debt:'+x.id,x);for(const x of state.cards||[])add('card:'+x.id,x);for(const x of state.side_accounts||[])add('side:'+x.id,x);for(const [k,x] of Object.entries(state.monthly?.cycles||{}))add('cycle:'+k,x);for(const x of state.history||[])add('history:'+x.month,x);add('planning:amount',state.planning?.fixed_amount_schedule||{});add('planning:visibility',state.planning?.fixed_visibility_schedule||{});return m
-}
-function collectChanges(){
-  if(!state?.meta?.initialized)return [];
-  const flat=flatAll(),meta=jget(META_KEY,{}),queue=jget(QUEUE_KEY,[]),queued=new Map(queue.map(x=>[x.k,x])),ts=now();
-  for(const [k,v] of flat){const h=hash(v),old=meta[k];if(!old||old.h!==h){const rec={k,v,t:ts,d:false};queued.set(k,rec);meta[k]={h,t:ts,d:false}}}
-  for(const [k,old] of Object.entries(meta)){if(!flat.has(k)&&!old.d){const rec={k,v:'',t:ts,d:true};queued.set(k,rec);meta[k]={h:'',t:ts,d:true}}}
-  jset(META_KEY,meta);const out=[...queued.values()];jset(QUEUE_KEY,out);return out
-}
-function upsert(arr,obj,id='id'){const i=arr.findIndex(x=>x?.[id]===obj?.[id]);if(i>=0)arr[i]=obj;else arr.push(obj)}
-function remove(arr,val,id='id'){const i=arr.findIndex(x=>x?.[id]===val);if(i>=0)arr.splice(i,1)}
-function applyOne(r){
-  const meta=jget(META_KEY,{}),old=meta[r.k];if(old&&Number(old.t||0)>Number(r.t||0))return false;
-  const del=!!r.d;let v=null;if(!del){try{v=JSON.parse(r.v)}catch{return false}}
-  const [kind,...rest]=r.k.split(':'),id=rest.join(':');
-  if(kind==='core'){if(!del){state.schema_version=v.schema_version||7;state.currency=v.currency||'COP';state.timezone=v.timezone||'America/Bogota';state.live_start_date=v.live_start_date||'2026-10-01';state.account=v.account||state.account;state.monthly=state.monthly||{cycles:{}};state.monthly.first_cycle=v.monthly?.first_cycle||'2026-10';state.monthly.default_income_label=v.monthly?.default_income_label||'Sueldo';state.monthly.default_income_amount=v.monthly?.default_income_amount||0;state.preferences={...(state.preferences||{}),...(v.preferences||{})};state.meta={...(state.meta||{}),...(v.meta||{}),real_mode:true}}}
-  else if(kind==='fixed'){del?remove(state.fixed_expenses,id):upsert(state.fixed_expenses,v)}
-  else if(kind==='pocket'){del?remove(state.pockets,id):upsert(state.pockets,v)}
-  else if(kind==='pocketmov'){del?remove(state.pocket_movements,id):upsert(state.pocket_movements,v)}
-  else if(kind==='receivable'){del?remove(state.receivables,id):upsert(state.receivables,v)}
-  else if(kind==='tx'){del?remove(state.transactions,id):upsert(state.transactions,v)}
-  else if(kind==='debt'){del?remove(state.debts,id):upsert(state.debts,v)}
-  else if(kind==='card'){del?remove(state.cards,id):upsert(state.cards,v)}
-  else if(kind==='side'){del?remove(state.side_accounts,id):upsert(state.side_accounts,v)}
-  else if(kind==='cycle'){state.monthly.cycles=state.monthly.cycles||{};del?delete state.monthly.cycles[id]:state.monthly.cycles[id]=v}
-  else if(kind==='history'){del?remove(state.history,id,'month'):upsert(state.history,v,'month')}
-  else if(r.k==='planning:amount'){if(!del)state.planning.fixed_amount_schedule=v}
-  else if(r.k==='planning:visibility'){if(!del)state.planning.fixed_visibility_schedule=v}
-  else return false;
-  meta[r.k]={h:del?'':hash(r.v),t:Number(r.t||0),d:del};jset(META_KEY,meta);return true
-}
-function applyRemote(records){
-  let changed=false;window.FPCU_SYNC_SUSPEND=true;
-  try{for(const r of records||[])changed=applyOne(r)||changed;if(changed){state=normalizeLiveState(state);syncCardAlias();localStorage.setItem(KEY,JSON.stringify(state));const hm=document.getElementById('historyMonths');if(hm)hm.dataset.done='';render();renderThemeControls?.()}}
-  finally{window.FPCU_SYNC_SUSPEND=false}return changed
-}
-async function pull(since){return await post({action:'pull',session:session(),since:Math.max(0,Number(since||0)),device:deviceId()})}
-async function pushQueue(){let q=jget(QUEUE_KEY,[]);while(q.length){const batch=q.slice(0,200),j=await post({action:'push',session:session(),device:deviceId(),records:batch});q=q.slice(batch.length);jset(QUEUE_KEY,q);if(j.serverTime)jset(LAST_KEY,{...(jget(LAST_KEY,{})),server:j.serverTime})}return true}
-async function syncNow(forceFull=false){
-  if(syncing||!cfgReady())return;const tok=session();if(!tok){showGate('Escribe tu clave privada para sincronizar.');return}
-  syncing=true;setStatus('Sincronizando...','busy');
-  try{
-    let last=jget(LAST_KEY,{server:0,first:false});
-    if(!last.first||forceFull){
-      const first=await pull(0);
-      if(first.totalRecords>0){applyRemote(first.records);last={server:first.serverTime||now(),first:true};jset(LAST_KEY,last)}
-      else if(state?.meta?.initialized){collectChanges();await pushQueue();const again=await pull(0);applyRemote(again.records);last={server:again.serverTime||now(),first:true};jset(LAST_KEY,last)}
-      else{last={server:first.serverTime||now(),first:true};jset(LAST_KEY,last);setStatus('Listo para importar apertura','ok');const t=document.getElementById('syncSettingsText');if(t)t.textContent='La base central esta vacia. Importa el archivo privado de apertura para iniciar.';return}
+/*
+ * FP&CU v2 — almacenamiento local y sincronización por registro.
+ * - Cada dato es un registro con clave única ("tipo:id") y marca de tiempo.
+ * - Los cambios se guardan primero en este dispositivo y se encolan.
+ * - Sincronización: primero descarga lo nuevo del servidor, luego sube la cola.
+ * - Conflictos: gana la escritura más reciente (t); empate por id de dispositivo.
+ * - Los borrados son "lápidas" (d = 1) para que también se sincronicen.
+ * Este archivo no contiene datos ni claves.
+ */
+(function () {
+  'use strict';
+
+  const C = Object.assign(
+    { serverUrl: '', syncIntervalMs: 120000, saveDebounceMs: 3000, demo: false },
+    window.FPCU_CONFIG || {}
+  );
+
+  const K = {
+    db: 'fpcu_db_v2',
+    queue: 'fpcu_sync_queue_v2',
+    meta: 'fpcu_sync_meta_v2',
+    last: 'fpcu_sync_last_v2',
+    session: 'fpcu_auth_session_v2',
+    device: 'fpcu_device_id_v1'
+  };
+
+  const listeners = {};
+  function on(ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); }
+  function emit(ev, data) {
+    (listeners[ev] || []).forEach(function (fn) { try { fn(data); } catch (e) { console.error(e); } });
+  }
+
+  const ls = {
+    get(k, def) {
+      try { const s = localStorage.getItem(k); return s == null ? def : JSON.parse(s); }
+      catch (e) { return def; }
+    },
+    set(k, v) {
+      try { localStorage.setItem(k, JSON.stringify(v)); return true; }
+      catch (e) { emit('error', 'No se pudo guardar en este dispositivo: ' + e.message); return false; }
+    },
+    del(k) { try { localStorage.removeItem(k); } catch (e) { /* nada */ } }
+  };
+
+  let device = '';
+  try { device = String(localStorage.getItem(K.device) || '').replace(/"/g, ''); } catch (e) { /* nada */ }
+  if (!device) {
+    device = 'd-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+    try { localStorage.setItem(K.device, device); } catch (e) { /* nada */ }
+  }
+
+  let db = ls.get(K.db, null);
+  if (!db || typeof db.r !== 'object') db = { r: {} };
+  let queue = new Set(ls.get(K.queue, []));
+  let meta = Object.assign({ cursor: 0, serverTotal: null, firstSyncDone: false }, ls.get(K.meta, {}));
+  let last = ls.get(K.last, null);
+  let session = ls.get(K.session, null);
+
+  const clone = (v) => (v && typeof v === 'object' ? JSON.parse(JSON.stringify(v)) : v);
+  const KEY_RE = /^[a-z]+:[A-Za-z0-9._-]{1,120}$/;
+
+  function persist() { ls.set(K.db, db); ls.set(K.queue, Array.from(queue)); }
+  function changed() { persist(); emit('change'); emitStatus(); }
+
+  function newer(a, b) {
+    if (!b) return true;
+    if (a.t !== b.t) return a.t > b.t;
+    return String(a.dv || '') > String(b.dv || '');
+  }
+
+  function stamp(k) {
+    const prev = db.r[k];
+    const now = Date.now();
+    return prev && prev.t >= now ? prev.t + 1 : now;
+  }
+
+  // ---------- lectura ----------
+  function get(k) { const x = db.r[k]; return x && !x.d ? clone(x.v) : null; }
+  function list(prefix) {
+    const out = [];
+    for (const k in db.r) {
+      if (k.indexOf(prefix) === 0) { const x = db.r[k]; if (!x.d) out.push(clone(x.v)); }
     }
-    collectChanges();await pushQueue();last=jget(LAST_KEY,{server:0,first:true});const fresh=await pull(Math.max(0,Number(last.server||0)-5000));applyRemote(fresh.records);jset(LAST_KEY,{server:fresh.serverTime||now(),first:true});setStatus('Sincronizado','ok');const t=document.getElementById('syncSettingsText');if(t)t.textContent='Este dispositivo esta conectado con la copia central.'
-  }catch(e){
-    if(/sesion|session|autoriz/i.test(e.message)){setSession('');showGate('La sesion vencio. Escribe nuevamente la clave privada.')}
-    setStatus('Sin sincronizar','bad');const t=document.getElementById('syncSettingsText');if(t)t.textContent='No se pudo sincronizar: '+friendlyError(e.message)
-  }finally{syncing=false}
-}
-function schedule(){clearTimeout(timer);timer=setTimeout(()=>syncNow(false),Number(C.SAVE_DEBOUNCE_MS)||3000)}
-async function ping(){if(!session())return false;try{await post({action:'ping',session:session(),device:deviceId()});return true}catch{return false}}
-function logout(){setSession('');setStatus('Sesion cerrada','');showGate('Sesion cerrada. Escribe tu clave privada para volver a abrir FP&CU.')}
-async function backupNow(){if(!session())return showGate('Inicia sesion primero.');try{setStatus('Creando respaldo...','busy');const j=await post({action:'backup',session:session(),device:deviceId()});setStatus('Respaldo creado','ok');return j}catch(e){setStatus('Error de respaldo','bad');throw e}}
-async function boot(){if(booted)return;booted=true;gate();if(!cfgReady()){showGate('La aplicacion esta preparada, pero falta conectar la URL de Apps Script en config.js.');return}if(await ping()){hideGate();await syncNow(true)}else{setSession('');showGate('Escribe la clave privada de FP&CU.')}}
-function bind(){
-  const syncBtn=document.getElementById('syncNowBtn'),logoutBtn=document.getElementById('logoutSyncBtn');
-  if(syncBtn)syncBtn.onclick=()=>syncNow(true);if(logoutBtn)logoutBtn.onclick=logout;
-  window.addEventListener('online',()=>syncNow(false));document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')syncNow(false)});
-  setInterval(()=>{if(document.visibilityState==='visible'&&navigator.onLine)syncNow(false)},Number(C.SYNC_INTERVAL_MS)||120000)
-}
-window.FPCUSync={schedule,syncNow,logout,backupNow,boot};window.addEventListener('load',()=>{bind();boot()});
+    return out;
+  }
+  function count() { let n = 0; for (const k in db.r) if (!db.r[k].d) n++; return n; }
+
+  // ---------- escritura ----------
+  function write(k, v, del) {
+    if (!KEY_RE.test(k)) throw new Error('Clave no válida: ' + k);
+    db.r[k] = del ? { v: null, t: stamp(k), d: 1, dv: device } : { v: clone(v), t: stamp(k), d: 0, dv: device };
+    queue.add(k);
+  }
+  function put(k, v) { write(k, v, false); changed(); schedule(); }
+  function del(k) { if (!db.r[k] || db.r[k].d) return; write(k, null, true); changed(); schedule(); }
+  // ops: [['put', clave, valor], ['del', clave]]  -> un solo guardado
+  function tx(ops) {
+    ops.forEach(function (op) {
+      if (op[0] === 'put') write(op[1], op[2], false);
+      else if (op[0] === 'del' && db.r[op[1]] && !db.r[op[1]].d) write(op[1], null, true);
+    });
+    changed(); schedule();
+  }
+
+  // ---------- importar / exportar ----------
+  function exportData() {
+    return { app: 'FPCU', schema: 2, exported: new Date().toISOString(), device: device, records: clone(db.r) };
+  }
+
+  function normalizeImport(obj) {
+    if (!obj || typeof obj !== 'object') throw new Error('El archivo no es un JSON válido.');
+    if (obj.app !== 'FPCU' || Number(obj.schema) !== 2 || !obj.records) {
+      throw new Error('Este archivo no es una apertura o respaldo de FP&CU v2.');
+    }
+    const out = [];
+    const recs = obj.records;
+    const entries = Array.isArray(recs) ? recs.map((r) => [r.k, r]) : Object.keys(recs).map((k) => [k, recs[k]]);
+    entries.forEach(function (e) {
+      const k = e[0], r = e[1] || {};
+      if (!KEY_RE.test(String(k))) return;
+      let v = r.v;
+      if (typeof v === 'string') { try { v = JSON.parse(v); } catch (x) { /* valor plano */ } }
+      out.push([k, { v: r.d ? null : v, t: Number(r.t) || Date.now(), d: r.d ? 1 : 0, dv: r.dv || 'importado' }]);
+    });
+    return out;
+  }
+
+  function previewImport(obj) {
+    const recs = normalizeImport(obj);
+    const byType = {};
+    let fresh = 0, older = 0;
+    recs.forEach(function (e) {
+      const t = e[0].split(':')[0];
+      byType[t] = (byType[t] || 0) + 1;
+      if (newer(e[1], db.r[e[0]])) fresh++; else older++;
+    });
+    const cfg = recs.find((e) => e[0] === 'cfg:main');
+    return { total: recs.length, byType: byType, fresh: fresh, older: older, cfg: cfg ? cfg[1].v : null };
+  }
+
+  // Idempotente: conserva las marcas de tiempo del archivo, así que importar
+  // dos veces el mismo archivo no duplica nada ni pisa cambios posteriores.
+  function importData(obj) {
+    const recs = normalizeImport(obj);
+    let applied = 0, skipped = 0;
+    recs.forEach(function (e) {
+      if (newer(e[1], db.r[e[0]])) { db.r[e[0]] = e[1]; queue.add(e[0]); applied++; }
+      else skipped++;
+    });
+    changed(); schedule(500);
+    return { applied: applied, skipped: skipped };
+  }
+
+  function wipeLocal() {
+    db = { r: {} }; queue = new Set(); meta = { cursor: 0, serverTotal: null, firstSyncDone: false }; last = null;
+    ls.del(K.db); ls.del(K.queue); ls.del(K.meta); ls.del(K.last);
+    emit('change'); emitStatus();
+  }
+
+  function redownload() {
+    meta.cursor = 0; meta.firstSyncDone = false; ls.set(K.meta, meta);
+    return sync();
+  }
+
+  // ---------- sincronización ----------
+  let status = C.serverUrl ? 'idle' : 'local';
+  let current = null, followUp = null, timer = null;
+
+  function mode() { return C.serverUrl ? 'server' : 'local'; }
+  function sessionValid() { return !!(session && session.token && session.exp > Date.now()); }
+  function getState() {
+    return {
+      status: status, mode: mode(), pending: queue.size, last: last, device: device,
+      sessionValid: sessionValid(), sessionExp: session ? session.exp : null,
+      serverTotal: meta.serverTotal, firstSyncDone: !!meta.firstSyncDone, localCount: count(), demo: !!C.demo
+    };
+  }
+  function emitStatus() { emit('status', getState()); }
+  function setStatus(s) { status = s; emitStatus(); }
+
+  function schedule(ms) {
+    if (mode() !== 'server') return;
+    clearTimeout(timer);
+    timer = setTimeout(sync, ms == null ? C.saveDebounceMs : ms);
+  }
+
+  async function call(action, payload) {
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const to = setTimeout(function () { if (ctrl) ctrl.abort(); }, 30000);
+    try {
+      const res = await fetch(C.serverUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(Object.assign({ action: action, device: device }, payload || {})),
+        redirect: 'follow',
+        cache: 'no-store',
+        signal: ctrl ? ctrl.signal : undefined
+      });
+      if (!res.ok) throw Object.assign(new Error('El servidor respondió ' + res.status), { code: 'http' });
+      let j;
+      try { j = await res.json(); }
+      catch (e) {
+        throw Object.assign(new Error('Respuesta no válida del servidor. Revisa la URL /exec y que el acceso sea "Cualquier usuario".'), { code: 'http' });
+      }
+      if (!j.ok) throw Object.assign(new Error(j.error || 'Error del servidor'), { code: j.code || 'server' });
+      return j;
+    } catch (e) {
+      if (e.name === 'AbortError') throw Object.assign(new Error('El servidor tardó demasiado en responder.'), { code: 'net' });
+      if (!e.code) e.code = 'net';
+      throw e;
+    } finally { clearTimeout(to); }
+  }
+
+  async function login(key) {
+    const j = await call('login', { key: String(key || '') });
+    session = { token: j.token, exp: j.exp };
+    ls.set(K.session, session);
+    setStatus('idle');
+    sync();
+    return j;
+  }
+
+  function logout() { session = null; ls.del(K.session); setStatus('auth'); }
+
+  function applyRemote(rec) {
+    let v = null;
+    if (!rec.d) { try { v = JSON.parse(rec.v); } catch (e) { v = rec.v; } }
+    const inc = { v: v, t: Number(rec.t) || 0, d: rec.d ? 1 : 0, dv: rec.dv || '' };
+    const cur = db.r[rec.k];
+    if (cur && !newer(inc, cur)) return false;
+    db.r[rec.k] = inc;
+    queue.delete(rec.k);
+    return true;
+  }
+
+  // Si ya hay una sincronización en curso, se encadena una pasada más al terminar.
+  function sync() {
+    if (current) {
+      if (!followUp) followUp = current.then(function () { followUp = null; return sync(); });
+      return followUp;
+    }
+    current = runSync().then(function () { current = null; }, function () { current = null; });
+    return current;
+  }
+
+  async function runSync() {
+    clearTimeout(timer);
+    if (mode() !== 'server') { setStatus('local'); return; }
+    if (!sessionValid()) { if (session) logout(); else setStatus('auth'); return; }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) { setStatus('offline'); return; }
+    setStatus('syncing');
+    try {
+      // 1) Descargar lo nuevo del servidor
+      let more = true, guard = 0;
+      while (more && guard++ < 60) {
+        const j = await call('pull', { token: session.token, since: meta.cursor || 0, limit: 1000 });
+        let touched = false;
+        (j.records || []).forEach(function (r) { if (applyRemote(r)) touched = true; });
+        meta.cursor = Number(j.cursor) || meta.cursor || 0;
+        meta.serverTotal = j.total;
+        more = !!j.more;
+        ls.set(K.meta, meta);
+        if (touched) { persist(); emit('change'); }
+      }
+      // 2) Subir la cola local
+      const keys = Array.from(queue);
+      for (let i = 0; i < keys.length; i += 250) {
+        const batch = keys.slice(i, i + 250).filter((k) => db.r[k]);
+        if (!batch.length) continue;
+        const sent = {};
+        const recs = batch.map(function (k) {
+          const x = db.r[k];
+          sent[k] = x.t;
+          return { k: k, v: x.d ? '' : JSON.stringify(x.v), t: x.t, d: x.d ? 1 : 0 };
+        });
+        const j = await call('push', { token: session.token, records: recs });
+        let touched = false;
+        (j.results || []).forEach(function (r) {
+          if (r.status === 'stale' && r.rec) { if (applyRemote(r.rec)) touched = true; }
+          const cur = db.r[r.k];
+          if (!cur || cur.t === sent[r.k]) queue.delete(r.k);
+        });
+        if (j.total != null) meta.serverTotal = j.total;
+        persist();
+        if (touched) emit('change');
+      }
+      meta.firstSyncDone = true; ls.set(K.meta, meta);
+      last = { at: Date.now(), ok: true }; ls.set(K.last, last);
+      setStatus('ok');
+    } catch (e) {
+      last = { at: Date.now(), ok: false, error: e.message }; ls.set(K.last, last);
+      if (e.code === 'auth') { session = null; ls.del(K.session); setStatus('auth'); }
+      else if (e.code === 'net') setStatus(navigator.onLine === false ? 'offline' : 'error');
+      else setStatus('error');
+    }
+  }
+
+  async function serverStatus() {
+    if (!sessionValid()) throw Object.assign(new Error('Inicia sesión primero.'), { code: 'auth' });
+    return call('status', { token: session.token });
+  }
+
+  if (mode() === 'server') {
+    setInterval(function () { if (document.visibilityState !== 'hidden') sync(); }, C.syncIntervalMs);
+    window.addEventListener('online', function () { sync(); });
+    window.addEventListener('offline', function () { setStatus('offline'); });
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') sync(); });
+  }
+
+  window.FPCU_STORE = {
+    config: C, device: device,
+    get: get, list: list, put: put, del: del, tx: tx, count: count,
+    on: on, getState: getState, sync: sync, login: login, logout: logout, serverStatus: serverStatus,
+    exportData: exportData, previewImport: previewImport, importData: importData,
+    wipeLocal: wipeLocal, redownload: redownload
+  };
 })();

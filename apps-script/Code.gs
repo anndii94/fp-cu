@@ -1,204 +1,350 @@
-const CONFIG = {
-  SYNC_SHEET: 'sync_records',
-  AUDIT_SHEET: 'audit_log',
-  BACKUP_FOLDER: 'FP&CU Respaldos',
-  SESSION_HOURS: 168,
-  BACKUP_RETENTION_DAYS: 35,
-  MAX_PUSH_RECORDS: 400
-};
+/**
+ * FP&CU v2 — servidor privado en Google Apps Script.
+ *
+ * Hoja "sync_records": un registro por fila (sincronización por registro).
+ * Seguridad: clave privada FPCU-... (solo se guarda su hash SHA-256),
+ * sesiones firmadas con HMAC, bloqueo temporal tras intentos fallidos.
+ * Respaldos: JSON diario en Drive ("FP&CU Respaldos"), retención 35 días.
+ *
+ * Este archivo no contiene datos ni claves. Se puede publicar en GitHub.
+ */
+
+var SHEET_RECORDS = 'sync_records';
+var SHEET_AUDIT = 'audit_log';
+var HEADERS = ['clave', 'valor', 't', 'borrado', 'recibido', 'dispositivo', 'seq'];
+var AUDIT_HEADERS = ['fecha', 'accion', 'dispositivo', 'registros', 'resultado'];
+var SESSION_DAYS = 30;          // duración de la sesión en cada dispositivo
+var BACKUP_FOLDER = 'FP&CU Respaldos';
+var BACKUP_KEEP_DAYS = 35;
+var MAX_FAILS = 8;              // intentos fallidos permitidos...
+var FAIL_WINDOW_SEC = 900;      // ...en 15 minutos
+var MAX_VALUE_CHARS = 45000;
+
+// ---------------------------------------------------------------- menú
 
 function onOpen() {
-  SpreadsheetApp.getUi().createMenu('FP&CU')
-    .addItem('Configurar servidor', 'setupFPCU')
-    .addItem('Rotar clave privada', 'rotateAccessKey')
-    .addSeparator()
-    .addItem('Crear respaldo ahora', 'createBackupNow')
-    .addItem('Ver estado del servidor', 'showServerStatus')
+  SpreadsheetApp.getUi()
+    .createMenu('FP&CU')
+    .addItem('Configurar servidor', 'configurarServidor')
+    .addItem('Rotar clave privada', 'rotarClave')
+    .addItem('Crear respaldo ahora', 'crearRespaldoAhora')
+    .addItem('Ver estado del servidor', 'verEstado')
     .addToUi();
 }
 
-function setupFPCU() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  if (!ss) throw new Error('Abre este script desde la hoja FP&CU Datos.');
-  const props = PropertiesService.getScriptProperties();
-  props.setProperty('SHEET_ID', ss.getId());
-  if (!props.getProperty('SESSION_SECRET')) props.setProperty('SESSION_SECRET', newSecret_());
-  ensureSheet_(ss, CONFIG.SYNC_SHEET, ['clave','valor','t','borrado','recibido','dispositivo']);
-  ensureSheet_(ss, CONFIG.AUDIT_SHEET, ['fecha','accion','dispositivo','detalle']);
-  let accessKey = null;
-  if (!props.getProperty('ACCESS_KEY_HASH')) accessKey = setNewAccessKey_();
-  const triggers = ScriptApp.getProjectTriggers();
-  if (!triggers.some(t => t.getHandlerFunction() === 'scheduledBackup')) {
-    ScriptApp.newTrigger('scheduledBackup').timeBased().everyDays(1).atHour(3).create();
+function configurarServidor() {
+  var ui = SpreadsheetApp.getUi();
+  var p = props_();
+  ensureSheets_();
+  ensureTrigger_();
+  p.setProperty('SPREADSHEET_ID', SpreadsheetApp.getActive().getId());
+  if (!p.getProperty('SEQ')) p.setProperty('SEQ', '0');
+  if (p.getProperty('KEY_HASH') && p.getProperty('KEY_VER')) {
+    var r = ui.alert('El servidor ya está configurado',
+      'Hojas y respaldo diario verificados.\n\n¿Quieres generar una clave privada nueva? Todas las sesiones abiertas se cerrarán.',
+      ui.ButtonSet.YES_NO);
+    if (r !== ui.Button.YES) return;
   }
-  scheduledBackup();
-  if (accessKey) showKey_(accessKey, 'Configuracion terminada');
-  else SpreadsheetApp.getUi().alert('FP&CU', 'Servidor configurado. La clave privada existente sigue vigente.', SpreadsheetApp.getUi().ButtonSet.OK);
+  issueKey_();
+  audit_('configurar', 'hoja', 0, 'ok');
 }
 
-function rotateAccessKey() {
-  const props = PropertiesService.getScriptProperties();
-  if (!props.getProperty('SHEET_ID')) throw new Error('Primero ejecuta Configurar servidor.');
-  const accessKey = setNewAccessKey_();
-  props.setProperty('SESSION_SECRET', newSecret_());
-  audit_('rotar_clave', '', 'Todas las sesiones anteriores quedaron invalidadas');
-  showKey_(accessKey, 'Nueva clave privada');
+function rotarClave() {
+  var ui = SpreadsheetApp.getUi();
+  var r = ui.alert('Rotar clave privada', 'Se generará una clave nueva y todos los dispositivos tendrán que volver a entrar. ¿Continuar?', ui.ButtonSet.YES_NO);
+  if (r !== ui.Button.YES) return;
+  issueKey_();
+  audit_('rotar_clave', 'hoja', 0, 'ok');
 }
 
-function showServerStatus() {
-  const props = PropertiesService.getScriptProperties();
-  const ssId = props.getProperty('SHEET_ID');
-  const hasKey = !!props.getProperty('ACCESS_KEY_HASH');
-  const last = props.getProperty('LAST_BACKUP_DAY') || 'sin respaldo';
-  SpreadsheetApp.getUi().alert('Estado FP&CU', `Hoja conectada: ${ssId ? 'si' : 'no'}\nClave privada: ${hasKey ? 'configurada' : 'no'}\nUltimo respaldo: ${last}`, SpreadsheetApp.getUi().ButtonSet.OK);
+function crearRespaldoAhora() {
+  var f = backup_('manual');
+  SpreadsheetApp.getUi().alert('Respaldo creado', f.getName() + '\nCarpeta: ' + BACKUP_FOLDER, SpreadsheetApp.getUi().ButtonSet.OK);
 }
 
-function createBackupNow() {
-  const name = scheduledBackup();
-  SpreadsheetApp.getUi().alert('FP&CU', 'Respaldo creado: ' + name, SpreadsheetApp.getUi().ButtonSet.OK);
+function verEstado() {
+  var st = status_();
+  var url = '';
+  try { url = ScriptApp.getService().getUrl() || ''; } catch (e) { /* sin despliegue */ }
+  var msg = [
+    'Registros activos: ' + st.total,
+    'Registros borrados (lápidas): ' + st.deleted,
+    'Secuencia del servidor: ' + st.seq,
+    'Clave configurada: ' + (st.configured ? 'sí' : 'no'),
+    'Duración de sesión: ' + SESSION_DAYS + ' días',
+    'Respaldo diario: ' + (st.trigger ? 'activo' : 'no programado'),
+    'Último respaldo: ' + (st.lastBackup || 'ninguno'),
+    'URL /exec: ' + (url || 'publica la app web para verla')
+  ].join('\n');
+  SpreadsheetApp.getUi().alert('Estado de FP&CU', msg, SpreadsheetApp.getUi().ButtonSet.OK);
 }
+
+// Disparador diario (debe ser función pública)
+function respaldoDiario() { backup_('diario'); }
+
+// ---------------------------------------------------------------- web app
 
 function doGet() {
-  return json_({ok:true,service:'FP&CU Sync',auth:'required'});
+  return out_({ ok: true, app: 'FPCU', version: 2, msg: 'Servidor activo. Sin sesión no entrega datos.' });
 }
 
 function doPost(e) {
+  var req;
+  try { req = JSON.parse(e.postData.contents); }
+  catch (x) { return out_({ ok: false, code: 'bad', error: 'Solicitud no válida.' }); }
   try {
-    const body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
-    if (body.action === 'login') {
-      if (!verifyAccessKey_(body.accessKey || '')) {
-        audit_('login_fallido', body.device || '', 'clave incorrecta');
-        return json_({ok:false,error:'clave_privada_incorrecta'});
-      }
-      const token = issueSession_();
-      audit_('login', body.device || '', 'ok');
-      return json_({ok:true,session:token,serverTime:Date.now()});
+    switch (req.action) {
+      case 'ping': return out_({ ok: true, app: 'FPCU', version: 2 });
+      case 'login': return out_(login_(req));
+      case 'pull': auth_(req); return out_(pull_(req));
+      case 'push': auth_(req); return out_(push_(req));
+      case 'status': auth_(req); return out_(Object.assign({ ok: true }, status_()));
+      default: return out_({ ok: false, code: 'bad', error: 'Acción desconocida.' });
     }
-    const auth = verifySession_(body.session || '');
-    if (!auth.ok) return json_({ok:false,error:'sesion'});
-    if (body.action === 'ping') return json_({ok:true,serverTime:Date.now()});
-    if (body.action === 'pull') {
-      const since = Math.max(0, Number(body.since || 0));
-      const result = pull_(since);
-      audit_('pull', body.device || '', String(result.records.length));
-      return json_({ok:true,records:result.records,totalRecords:result.totalRecords,serverTime:Date.now()});
-    }
-    if (body.action === 'push') {
-      const records = Array.isArray(body.records) ? body.records : [];
-      if (records.length > CONFIG.MAX_PUSH_RECORDS) throw new Error('demasiados_registros');
-      const accepted = push_(records, body.device || '');
-      maybeDailyBackup_();
-      audit_('push', body.device || '', String(accepted));
-      return json_({ok:true,accepted,serverTime:Date.now()});
-    }
-    if (body.action === 'backup') {
-      const file = scheduledBackup();
-      audit_('backup', body.device || '', file || 'ok');
-      return json_({ok:true,file,serverTime:Date.now()});
-    }
-    return json_({ok:false,error:'accion'});
   } catch (err) {
-    return json_({ok:false,error:String(err && err.message ? err.message : err)});
+    return out_({ ok: false, code: err.code || 'server', error: String(err.message || err) });
   }
 }
 
-function setNewAccessKey_() {
-  const raw = 'FPCU-' + Utilities.getUuid().replace(/-/g,'') + Utilities.getUuid().replace(/-/g,'');
-  PropertiesService.getScriptProperties().setProperty('ACCESS_KEY_HASH', sha256Hex_(raw));
-  return raw;
+function out_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 
-function verifyAccessKey_(raw) {
-  if (!raw) return false;
-  const stored = PropertiesService.getScriptProperties().getProperty('ACCESS_KEY_HASH') || '';
-  return constantTimeEqual_(sha256Hex_(String(raw)), stored);
+// ---------------------------------------------------------------- seguridad
+
+function props_() { return PropertiesService.getScriptProperties(); }
+
+function issueKey_() {
+  var p = props_();
+  var raw = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '').toUpperCase();
+  var key = 'FPCU-' + raw.match(/.{1,8}/g).join('-');
+  p.setProperty('KEY_HASH', sha256_(normKey_(key)));
+  p.setProperty('HMAC_SECRET', Utilities.getUuid() + Utilities.getUuid());
+  p.setProperty('KEY_VER', String(Number(p.getProperty('KEY_VER') || '0') + 1));
+  var html = HtmlService.createHtmlOutput(
+    '<div style="font-family:system-ui,sans-serif;padding:6px">' +
+    '<p style="margin:0 0 10px">Copia esta clave en tu gestor de contraseñas. <b>No se volverá a mostrar</b> y no la envíes por chat.</p>' +
+    '<textarea id="k" readonly style="width:100%;height:70px;font:600 14px monospace;padding:8px">' + key + '</textarea>' +
+    '<p><button onclick="var t=document.getElementById(\'k\');t.select();document.execCommand(\'copy\');this.textContent=\'Copiada\'">Copiar clave</button></p>' +
+    '</div>').setWidth(460).setHeight(230);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Clave privada de FP&CU');
 }
 
-function issueSession_() {
-  const payload = {sub:'owner',iat:Date.now(),exp:Date.now()+CONFIG.SESSION_HOURS*60*60*1000,v:1};
-  const p = b64url_(JSON.stringify(payload));
-  const sig = b64urlBytes_(Utilities.computeHmacSha256Signature(p, sessionSecret_()));
-  return p + '.' + sig;
+function normKey_(k) { return String(k || '').trim().toUpperCase().replace(/\s+/g, ''); }
+
+function sha256_(s) {
+  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, s, Utilities.Charset.UTF_8);
+  return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('');
 }
 
-function verifySession_(token) {
-  try {
-    const parts = String(token || '').split('.');
-    if (parts.length !== 2) return {ok:false};
-    const expected = b64urlBytes_(Utilities.computeHmacSha256Signature(parts[0], sessionSecret_()));
-    if (!constantTimeEqual_(expected, parts[1])) return {ok:false};
-    const payload = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(pad64_(parts[0]))).getDataAsString());
-    if (payload.sub !== 'owner' || !payload.exp || Date.now() > Number(payload.exp)) return {ok:false};
-    return {ok:true};
-  } catch (_) { return {ok:false}; }
+function sign_(payload) {
+  var sig = Utilities.computeHmacSha256Signature(payload, props_().getProperty('HMAC_SECRET'));
+  return Utilities.base64EncodeWebSafe(sig).replace(/=+$/, '');
 }
 
-function push_(records, device) {
-  const lock = LockService.getScriptLock(); lock.waitLock(20000);
-  try {
-    const sh = syncSheet_(), values = sh.getDataRange().getValues(), idx = {};
-    for (let i=1;i<values.length;i++) idx[String(values[i][0])] = i+1;
-    let accepted = 0;
-    for (const r of records) {
-      if (!r || !r.k) continue;
-      const key=String(r.k), t=Number(r.t||0), del=!!r.d, val=del?'':String(r.v||''), received=Date.now();
-      const row=idx[key];
-      if (row) {
-        const oldT=Number(sh.getRange(row,3).getValue()||0);
-        if (t < oldT) continue;
-        sh.getRange(row,1,1,6).setValues([[key,val,t,del,received,device]]);
+function login_(req) {
+  var p = props_();
+  if (!p.getProperty('KEY_HASH')) return { ok: false, code: 'setup', error: 'El servidor no está configurado. En la hoja: FP&CU > Configurar servidor.' };
+  var cache = CacheService.getScriptCache();
+  var fails = Number(cache.get('fails') || '0');
+  if (fails >= MAX_FAILS) {
+    audit_('login_bloqueado', req.device, 0, 'bloqueado');
+    return { ok: false, code: 'locked', error: 'Demasiados intentos. Espera 15 minutos.' };
+  }
+  if (sha256_(normKey_(req.key)) !== p.getProperty('KEY_HASH')) {
+    cache.put('fails', String(fails + 1), FAIL_WINDOW_SEC);
+    Utilities.sleep(700);
+    audit_('login', req.device, 0, 'clave incorrecta');
+    return { ok: false, code: 'badkey', error: 'Clave incorrecta.' };
+  }
+  var exp = Date.now() + SESSION_DAYS * 24 * 3600 * 1000;
+  var payload = Utilities.base64EncodeWebSafe(JSON.stringify({ exp: exp, dv: String(req.device || '').slice(0, 40), v: p.getProperty('KEY_VER') }));
+  audit_('login', req.device, 0, 'ok');
+  return { ok: true, token: payload + '.' + sign_(payload), exp: exp };
+}
+
+function auth_(req) {
+  var fail = function () { var e = new Error('Sesión vencida o no válida. Vuelve a entrar con tu clave.'); e.code = 'auth'; throw e; };
+  var parts = String(req.token || '').split('.');
+  if (parts.length !== 2 || !props_().getProperty('HMAC_SECRET')) fail();
+  if (sign_(parts[0]) !== parts[1]) fail();
+  var data;
+  try { data = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString()); } catch (e) { fail(); }
+  if (!data || data.exp < Date.now() || String(data.v) !== String(props_().getProperty('KEY_VER'))) fail();
+  return data;
+}
+
+// ---------------------------------------------------------------- datos
+
+function ss_() {
+  var id = props_().getProperty('SPREADSHEET_ID');
+  return id ? SpreadsheetApp.openById(id) : SpreadsheetApp.getActive();
+}
+
+function ensureSheets_() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getSheetByName(SHEET_RECORDS);
+  if (sh && sh.getMaxColumns() < HEADERS.length) sh.insertColumnsAfter(sh.getMaxColumns(), HEADERS.length - sh.getMaxColumns());
+  if (sh) {
+    var head = sh.getRange(1, 1, 1, sh.getMaxColumns()).getValues()[0].slice(0, HEADERS.length).join('|');
+    if (head !== HEADERS.join('|')) {
+      if (sh.getLastRow() > 1) {
+        sh.setName(SHEET_RECORDS + '_v1_' + Utilities.formatDate(new Date(), 'America/Bogota', 'yyyyMMdd_HHmm'));
+        sh = null;
       } else {
-        sh.appendRow([key,val,t,del,received,device]); idx[key]=sh.getLastRow();
+        sh.clear();
       }
-      accepted++;
     }
-    return accepted;
-  } finally { lock.releaseLock(); }
-}
-
-function pull_(since) {
-  const sh=syncSheet_(), values=sh.getDataRange().getValues(), records=[];
-  for (let i=1;i<values.length;i++) {
-    const [k,v,t,d,received,device]=values[i];
-    if (!k) continue;
-    if (Number(received||0) > since) records.push({k:String(k),v:String(v||''),t:Number(t||0),d:d===true||String(d).toUpperCase()==='TRUE',received:Number(received||0),device:String(device||'')});
   }
-  return {records,totalRecords:Math.max(0,values.length-1)};
+  if (!sh) sh = ss.getSheetByName(SHEET_RECORDS) || ss.insertSheet(SHEET_RECORDS);
+  sh.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]).setFontWeight('bold');
+  sh.getRange('A:B').setNumberFormat('@');
+  sh.setFrozenRows(1);
+  var au = ss.getSheetByName(SHEET_AUDIT) || ss.insertSheet(SHEET_AUDIT);
+  au.getRange(1, 1, 1, AUDIT_HEADERS.length).setValues([AUDIT_HEADERS]).setFontWeight('bold');
+  au.setFrozenRows(1);
 }
 
-function scheduledBackup() {
-  const records=pull_(0).records;
-  const payload={schema:'fpcu_server_backup_v1',created_at:new Date().toISOString(),records};
-  const folder=backupFolder_();
-  const stamp=Utilities.formatDate(new Date(),Session.getScriptTimeZone()||'America/Bogota','yyyy-MM-dd_HHmmss');
-  const name='fpcu-backup-'+stamp+'.json';
-  folder.createFile(name,JSON.stringify(payload,null,2),MimeType.PLAIN_TEXT);
-  PropertiesService.getScriptProperties().setProperty('LAST_BACKUP_DAY',Utilities.formatDate(new Date(),Session.getScriptTimeZone()||'America/Bogota','yyyy-MM-dd'));
-  pruneBackups_(folder);
-  return name;
+function readAll_(sh) {
+  var n = sh.getLastRow() - 1;
+  return n > 0 ? sh.getRange(2, 1, n, HEADERS.length).getValues() : [];
 }
 
-function maybeDailyBackup_() {
-  const tz=Session.getScriptTimeZone()||'America/Bogota', today=Utilities.formatDate(new Date(),tz,'yyyy-MM-dd'), props=PropertiesService.getScriptProperties();
-  if (props.getProperty('LAST_BACKUP_DAY') !== today) scheduledBackup();
+function rowToRec_(r) {
+  return { k: String(r[0]), v: String(r[1]), t: Number(r[2]), d: Number(r[3]) ? 1 : 0, dv: String(r[5] || ''), s: Number(r[6]) };
 }
 
-function pruneBackups_(folder) {
-  const cutoff=Date.now()-CONFIG.BACKUP_RETENTION_DAYS*24*60*60*1000, files=folder.getFiles();
-  while (files.hasNext()) { const f=files.next(); if (f.getName().indexOf('fpcu-backup-')===0 && f.getDateCreated().getTime()<cutoff) f.setTrashed(true); }
+function pull_(req) {
+  var sh = ss_().getSheetByName(SHEET_RECORDS);
+  var since = Number(req.since) || 0;
+  var limit = Math.min(Number(req.limit) || 1000, 2000);
+  var rows = readAll_(sh);
+  var total = 0;
+  var fresh = [];
+  rows.forEach(function (r) {
+    if (!r[0]) return;
+    if (!Number(r[3])) total++;
+    if (Number(r[6]) > since) fresh.push(rowToRec_(r));
+  });
+  fresh.sort(function (a, b) { return a.s - b.s; });
+  var page = fresh.slice(0, limit);
+  return { ok: true, records: page, cursor: page.length ? page[page.length - 1].s : since, more: fresh.length > limit, total: total };
 }
 
-function syncSheet_(){return spreadsheet_().getSheetByName(CONFIG.SYNC_SHEET)||ensureSheet_(spreadsheet_(),CONFIG.SYNC_SHEET,['clave','valor','t','borrado','recibido','dispositivo'])}
-function spreadsheet_(){const id=PropertiesService.getScriptProperties().getProperty('SHEET_ID');if(!id)throw new Error('ejecuta_setupFPCU');return SpreadsheetApp.openById(id)}
-function ensureSheet_(ss,name,headers){let sh=ss.getSheetByName(name);if(!sh)sh=ss.insertSheet(name);if(sh.getLastRow()===0)sh.appendRow(headers);return sh}
-function audit_(action,device,detail){try{const sh=spreadsheet_().getSheetByName(CONFIG.AUDIT_SHEET)||ensureSheet_(spreadsheet_(),CONFIG.AUDIT_SHEET,['fecha','accion','dispositivo','detalle']);sh.appendRow([new Date(),action,device,detail])}catch(_){}}
-function backupFolder_(){const props=PropertiesService.getScriptProperties(),id=props.getProperty('BACKUP_FOLDER_ID');if(id){try{return DriveApp.getFolderById(id)}catch(_){}}const it=DriveApp.getFoldersByName(CONFIG.BACKUP_FOLDER);const folder=it.hasNext()?it.next():DriveApp.createFolder(CONFIG.BACKUP_FOLDER);props.setProperty('BACKUP_FOLDER_ID',folder.getId());return folder}
-function sessionSecret_(){const s=PropertiesService.getScriptProperties().getProperty('SESSION_SECRET');if(!s)throw new Error('ejecuta_setupFPCU');return s}
-function newSecret_(){return Utilities.getUuid()+Utilities.getUuid()+Utilities.getUuid()}
-function sha256Hex_(text){return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,String(text),Utilities.Charset.UTF_8).map(b=>('0'+((b<0?b+256:b).toString(16))).slice(-2)).join('')}
-function constantTimeEqual_(a,b){a=String(a||'');b=String(b||'');if(a.length!==b.length)return false;let diff=0;for(let i=0;i<a.length;i++)diff|=a.charCodeAt(i)^b.charCodeAt(i);return diff===0}
-function b64url_(text){return Utilities.base64EncodeWebSafe(text,Utilities.Charset.UTF_8).replace(/=+$/,'')}
-function b64urlBytes_(bytes){return Utilities.base64EncodeWebSafe(bytes).replace(/=+$/,'')}
-function pad64_(s){while(s.length%4)s+='=';return s}
-function json_(obj){return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON)}
-function showKey_(key,title){SpreadsheetApp.getUi().alert(title, 'COPIA ESTA CLAVE Y GUARDALA EN TU GESTOR DE CONTRASENAS:\n\n'+key+'\n\nNo la subas a GitHub ni la compartas.', SpreadsheetApp.getUi().ButtonSet.OK)}
+function push_(req) {
+  var recs = Array.isArray(req.records) ? req.records : [];
+  if (recs.length > 500) { var e = new Error('Demasiados registros en un envío.'); e.code = 'bad'; throw e; }
+  var dev = String(req.device || '').slice(0, 40);
+  var lock = LockService.getScriptLock();
+  lock.waitLock(25000);
+  try {
+    var p = props_();
+    var sh = ss_().getSheetByName(SHEET_RECORDS);
+    var rows = readAll_(sh);
+    var index = {};
+    rows.forEach(function (r, i) { if (r[0]) index[String(r[0])] = i; });
+    var seq = Number(p.getProperty('SEQ') || '0');
+    var now = Utilities.formatDate(new Date(), 'America/Bogota', "yyyy-MM-dd'T'HH:mm:ss");
+    var results = [];
+    var accepted = 0;
+    recs.forEach(function (rec) {
+      var k = String(rec.k || '');
+      var v = String(rec.v == null ? '' : rec.v);
+      var t = Number(rec.t);
+      if (!/^[a-z]+:[A-Za-z0-9._-]{1,120}$/.test(k) || !t || v.length > MAX_VALUE_CHARS) {
+        results.push({ k: k, status: 'invalid' });
+        return;
+      }
+      var i = index[k];
+      if (i !== undefined) {
+        var cur = rows[i];
+        var curT = Number(cur[2]);
+        if (curT > t || (curT === t && String(cur[5]) >= dev)) {
+          results.push(curT === t ? { k: k, status: 'ok' } : { k: k, status: 'stale', rec: rowToRec_(cur) });
+          return;
+        }
+      }
+      seq++;
+      var row = [k, rec.d ? '' : v, t, rec.d ? 1 : 0, now, dev, seq];
+      if (i !== undefined) rows[i] = row; else { index[k] = rows.length; rows.push(row); }
+      accepted++;
+      results.push({ k: k, status: 'ok' });
+    });
+    if (accepted) {
+      sh.getRange(2, 1, rows.length, HEADERS.length).setValues(rows);
+      p.setProperty('SEQ', String(seq));
+    }
+    var total = rows.filter(function (r) { return r[0] && !Number(r[3]); }).length;
+    audit_('push', dev, accepted, 'ok');
+    return { ok: true, results: results, cursor: seq, total: total };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function status_() {
+  var p = props_();
+  var sh = ss_().getSheetByName(SHEET_RECORDS);
+  var rows = sh ? readAll_(sh) : [];
+  var total = 0, deleted = 0;
+  rows.forEach(function (r) { if (!r[0]) return; if (Number(r[3])) deleted++; else total++; });
+  var trig = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'respaldoDiario'; });
+  return {
+    total: total, deleted: deleted, seq: Number(p.getProperty('SEQ') || '0'),
+    configured: !!p.getProperty('KEY_HASH'), trigger: trig,
+    lastBackup: p.getProperty('LAST_BACKUP') || null, sessionDays: SESSION_DAYS
+  };
+}
+
+// ---------------------------------------------------------------- respaldos
+
+function ensureTrigger_() {
+  var has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'respaldoDiario'; });
+  if (!has) ScriptApp.newTrigger('respaldoDiario').timeBased().everyDays(1).atHour(3).create();
+}
+
+function folder_() {
+  var p = props_();
+  var id = p.getProperty('BACKUP_FOLDER_ID');
+  if (id) { try { return DriveApp.getFolderById(id); } catch (e) { /* recrear */ } }
+  var it = DriveApp.getFoldersByName(BACKUP_FOLDER);
+  var f = it.hasNext() ? it.next() : DriveApp.createFolder(BACKUP_FOLDER);
+  p.setProperty('BACKUP_FOLDER_ID', f.getId());
+  return f;
+}
+
+// Mismo formato que "Exportar JSON" de la app: se puede importar directamente.
+function backup_(kind) {
+  var sh = ss_().getSheetByName(SHEET_RECORDS);
+  var records = {};
+  readAll_(sh).forEach(function (r) {
+    if (!r[0]) return;
+    var v = null;
+    if (!Number(r[3])) { try { v = JSON.parse(String(r[1])); } catch (e) { v = String(r[1]); } }
+    records[String(r[0])] = { v: v, t: Number(r[2]), d: Number(r[3]) ? 1 : 0, dv: String(r[5] || '') };
+  });
+  var stamp = Utilities.formatDate(new Date(), 'America/Bogota', 'yyyy-MM-dd_HHmmss');
+  var body = JSON.stringify({ app: 'FPCU', schema: 2, exported: new Date().toISOString(), source: 'servidor-' + kind, records: records });
+  var folder = folder_();
+  var file = folder.createFile('fpcu-backup-' + stamp + '.json', body, MimeType.PLAIN_TEXT);
+  var limit = Date.now() - BACKUP_KEEP_DAYS * 24 * 3600 * 1000;
+  var files = folder.getFiles();
+  while (files.hasNext()) {
+    var f = files.next();
+    if (f.getName().indexOf('fpcu-backup-') === 0 && f.getDateCreated().getTime() < limit) f.setTrashed(true);
+  }
+  props_().setProperty('LAST_BACKUP', stamp);
+  audit_('respaldo_' + kind, 'servidor', Object.keys(records).length, 'ok');
+  return file;
+}
+
+// ---------------------------------------------------------------- auditoría
+
+function audit_(action, device, n, result) {
+  try {
+    var sh = ss_().getSheetByName(SHEET_AUDIT);
+    if (!sh) return;
+    sh.appendRow([Utilities.formatDate(new Date(), 'America/Bogota', 'yyyy-MM-dd HH:mm:ss'), action, String(device || ''), n || 0, result || '']);
+    if (sh.getLastRow() > 6000) sh.deleteRows(2, 1000);
+  } catch (e) { /* la auditoría nunca debe romper una operación */ }
+}
