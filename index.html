@@ -410,7 +410,7 @@ input[type="date"]::-webkit-date-and-time-value{text-align:left}
 var S = window.FPCU_STORE;
 if (!S) { document.getElementById('view').innerHTML = '<p class="empty">No se pudo cargar sync.js. Revisa que el archivo esté en el repositorio.</p>'; return; }
 var CFG = S.config;
-var VERSION = '2.9.0';
+var VERSION = '2.9.1';
 
 /* ============================== utilidades ============================== */
 var $ = function (s, r) { return (r || document).querySelector(s); };
@@ -1292,9 +1292,9 @@ function statusText(st) {
   if (st.mode === 'local') return { label: 'Solo este dispositivo', cls: 'warn' };
   if (!st.sessionValid) return { label: 'Entrar', cls: 'warn' };
   switch (st.status) {
-    case 'syncing': return { label: 'Sincronizando', cls: 'busy' };
+    case 'syncing': return { label: st.progress ? 'Subiendo ' + Math.round(st.progress.done / st.progress.total * 100) + '%' : 'Sincronizando', cls: 'busy' };
     case 'offline': return { label: 'Sin conexión' + (st.pending ? ' (' + st.pending + ')' : ''), cls: 'warn' };
-    case 'error': return { label: 'Error al sincronizar', cls: 'err' };
+    case 'error': return st.retries && st.retries < 5 ? { label: 'Reintentando' + (st.pending ? ' (' + st.pending + ')' : ''), cls: 'warn' } : { label: 'Error al sincronizar', cls: 'err' };
     case 'ok': return st.pending ? { label: 'Por subir (' + st.pending + ')', cls: 'warn' } : { label: 'Sincronizado', cls: 'ok' };
     default: return st.pending ? { label: 'Por subir (' + st.pending + ')', cls: 'warn' } : { label: 'Conectando', cls: 'busy' };
   }

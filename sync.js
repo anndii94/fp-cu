@@ -11,7 +11,7 @@
   'use strict';
 
   const C = Object.assign(
-    { serverUrl: '', syncIntervalMs: 120000, saveDebounceMs: 3000, demo: false },
+    { serverUrl: '', syncIntervalMs: 120000, saveDebounceMs: 3000, timeoutMs: 90000, batchSize: 100, demo: false },
     window.FPCU_CONFIG || {}
   );
 
@@ -164,7 +164,7 @@
 
   // ---------- sincronización ----------
   let status = C.serverUrl ? 'idle' : 'local';
-  let current = null, followUp = null, timer = null;
+  let current = null, followUp = null, timer = null, retries = 0, progress = null;
 
   function mode() { return C.serverUrl ? 'server' : 'local'; }
   function sessionValid() { return !!(session && session.token && session.exp > Date.now()); }
@@ -172,7 +172,8 @@
     return {
       status: status, mode: mode(), pending: queue.size, last: last, device: device,
       sessionValid: sessionValid(), sessionExp: session ? session.exp : null,
-      serverTotal: meta.serverTotal, firstSyncDone: !!meta.firstSyncDone, localCount: count(), demo: !!C.demo
+      serverTotal: meta.serverTotal, firstSyncDone: !!meta.firstSyncDone, localCount: count(), demo: !!C.demo,
+      progress: progress, retries: retries
     };
   }
   function emitStatus() { emit('status', getState()); }
@@ -186,7 +187,7 @@
 
   async function call(action, payload) {
     const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const to = setTimeout(function () { if (ctrl) ctrl.abort(); }, 30000);
+    const to = setTimeout(function () { if (ctrl) ctrl.abort(); }, C.timeoutMs);
     try {
       const res = await fetch(C.serverUrl, {
         method: 'POST',
@@ -205,7 +206,7 @@
       if (!j.ok) throw Object.assign(new Error(j.error || 'Error del servidor'), { code: j.code || 'server' });
       return j;
     } catch (e) {
-      if (e.name === 'AbortError') throw Object.assign(new Error('El servidor tardó demasiado en responder.'), { code: 'net' });
+      if (e.name === 'AbortError') throw Object.assign(new Error('El servidor tardó demasiado en responder.'), { code: 'net', timeout: true });
       if (!e.code) e.code = 'net';
       throw e;
     } finally { clearTimeout(to); }
@@ -263,9 +264,10 @@
         if (touched) { persist(); emit('change'); }
       }
       // 2) Subir la cola local
-      const keys = Array.from(queue);
-      for (let i = 0; i < keys.length; i += 250) {
-        const batch = keys.slice(i, i + 250).filter((k) => db.r[k]);
+      const keys = Array.from(queue), B = Math.max(10, C.batchSize | 0);
+      progress = keys.length > B ? { done: 0, total: keys.length } : null;
+      for (let i = 0; i < keys.length; i += B) {
+        const batch = keys.slice(i, i + B).filter((k) => db.r[k]);
         if (!batch.length) continue;
         const sent = {};
         const recs = batch.map(function (k) {
@@ -283,12 +285,22 @@
         if (j.total != null) meta.serverTotal = j.total;
         persist();
         if (touched) emit('change');
+        if (progress) { progress.done = Math.min(progress.total, i + batch.length); emitStatus(); }
       }
+      progress = null; retries = 0;
       meta.firstSyncDone = true; ls.set(K.meta, meta);
       last = { at: Date.now(), ok: true }; ls.set(K.last, last);
       setStatus('ok');
     } catch (e) {
+      progress = null;
       last = { at: Date.now(), ok: false, error: e.message }; ls.set(K.last, last);
+      // Reintento automático: lo ya subido no se repite.
+      if ((e.code === 'net' || e.code === 'http' || e.code === 'server') && retries < 5 && navigator.onLine !== false) {
+        retries++;
+        last.error = e.message + ' Reintentando automáticamente (' + retries + ' de 5).';
+        ls.set(K.last, last);
+        schedule(Math.min(60000, 4000 * Math.pow(2, retries - 1)));
+      }
       if (e.code === 'auth') { session = null; ls.del(K.session); setStatus('auth'); }
       else if (e.code === 'net') setStatus(navigator.onLine === false ? 'offline' : 'error');
       else setStatus('error');
