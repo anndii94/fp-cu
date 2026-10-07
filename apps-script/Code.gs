@@ -99,6 +99,9 @@ function doPost(e) {
       case 'pull': auth_(req); return out_(pull_(req));
       case 'push': auth_(req); return out_(push_(req));
       case 'status': auth_(req); return out_(Object.assign({ ok: true }, status_()));
+      case 'quick': return out_(quick_(req));
+      case 'shortcutKey': auth_(req); return out_(shortcutKey_());
+      case 'shortcutOff': auth_(req); props_().deleteProperty('SHORTCUT_HASH'); audit_('atajos_off', req.device, 0, 'ok'); return out_({ ok: true });
       default: return out_({ ok: false, code: 'bad', error: 'Acción desconocida.' });
     }
   } catch (err) {
@@ -292,8 +295,80 @@ function status_() {
   return {
     total: total, deleted: deleted, seq: Number(p.getProperty('SEQ') || '0'),
     configured: !!p.getProperty('KEY_HASH'), trigger: trig,
-    lastBackup: p.getProperty('LAST_BACKUP') || null, sessionDays: SESSION_DAYS
+    lastBackup: p.getProperty('LAST_BACKUP') || null, sessionDays: SESSION_DAYS, shortcut: !!p.getProperty('SHORTCUT_HASH')
   };
+}
+
+// ---------------------------------------------------------------- Siri / Atajos
+// Llave aparte, solo para AGREGAR registros desde un Atajo del iPhone. No permite leer datos.
+
+function shortcutKey_() {
+  var raw = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '').toUpperCase().slice(0, 32);
+  var key = 'ATJ-' + raw.match(/.{1,8}/g).join('-');
+  props_().setProperty('SHORTCUT_HASH', sha256_(normKey_(key)));
+  audit_('atajos_llave', 'app', 0, 'ok');
+  return { ok: true, key: key };
+}
+
+function parseMonto_(v) {
+  if (typeof v === 'number') return v;
+  var t = String(v || '').toLowerCase();
+  var mult = /mill[oó]n|millones/.test(t) ? 1000000 : /\bmil\b|\dmil/.test(t) ? 1000 : 1;
+  var x = t.replace(/[^\d,.]/g, '');
+  if (x.indexOf(',') >= 0) x = x.replace(/\./g, '').replace(',', '.');
+  else if (/\.\d{3}(\.|$)/.test(x)) x = x.replace(/\./g, '');
+  var n = Number(x);
+  return isFinite(n) ? n * mult : 0;
+}
+
+function cop_(n) {
+  var r = Math.round(n * 100) / 100, i = Math.floor(r), c = Math.round((r - i) * 100);
+  return '$' + String(i).replace(/\B(?=(\d{3})+(?!\d))/g, '.') + (c ? ',' + ('0' + c).slice(-2) : '');
+}
+
+function quick_(req) {
+  var p = props_(), fail = function (m) { return { ok: false, code: 'quick', error: m, msg: m }; };
+  if (!p.getProperty('SHORTCUT_HASH')) return fail('Los atajos no están activados. Crea la llave en la app: Ajustes > Siri y Atajos.');
+  var cache = CacheService.getScriptCache(), n = Number(cache.get('quick_n') || '0');
+  if (n > 40) return fail('Demasiados registros seguidos. Espera unos minutos.');
+  cache.put('quick_n', String(n + 1), 600);
+  if (sha256_(normKey_(req.llave || req.key)) !== p.getProperty('SHORTCUT_HASH')) { audit_('atajo', 'atajo', 0, 'llave incorrecta'); return fail('La llave del atajo no es válida.'); }
+  var tipo = String(req.tipo || 'gasto').toLowerCase().trim();
+  if (['gasto', 'ingreso', 'compra'].indexOf(tipo) < 0) return fail('Tipo no válido: usa gasto, ingreso o compra.');
+  var monto = Math.round(parseMonto_(req.monto) * 100) / 100;
+  if (!(monto > 0) || monto > 1e9) return fail('No entendí el monto.');
+  var desc = String(req.desc || req.descripcion || '').trim().slice(0, 80);
+  var cat = String(req.cat || req.categoria || '').trim().slice(0, 30) || 'Otros';
+  cat = cat.charAt(0).toUpperCase() + cat.slice(1);
+  var date = Utilities.formatDate(new Date(), 'America/Bogota', 'yyyy-MM-dd');
+  var now = Date.now(), id = 's' + now.toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+  var lock = LockService.getScriptLock(); lock.waitLock(25000);
+  try {
+    var sh = ss_().getSheetByName(SHEET_RECORDS), rows = readAll_(sh), key, val, msg;
+    if (tipo === 'compra') {
+      var cards = [];
+      rows.forEach(function (r) { if (String(r[0]).indexOf('card:') === 0 && !Number(r[3])) { try { var c = JSON.parse(String(r[1])); if (!c.archived) cards.push(c); } catch (e) { /* nada */ } } });
+      cards.sort(function (a, b) { return (a.order || 0) - (b.order || 0); });
+      var want = String(req.tarjeta || '').toLowerCase().trim();
+      var card = (want && cards.filter(function (c) { return String(c.name).toLowerCase().indexOf(want) >= 0; })[0]) || cards[0];
+      if (!card) return fail('No tienes tarjetas activas.');
+      var cuotas = Math.min(48, Math.max(1, parseInt(req.cuotas, 10) || 1));
+      key = 'buy:' + id;
+      val = { id: id, card: card.id, date: date, amount: monto, desc: desc, type: 'propia', cat: cat, cuotas: cuotas, noInt: false, cxc: null, via: 'siri', created: now };
+      msg = 'Listo: compra de ' + cop_(monto) + ' con ' + card.name + (cuotas > 1 ? ' a ' + cuotas + ' cuotas' : '') + (desc ? ', ' + desc : '') + '.';
+    } else {
+      key = 'mov:' + id;
+      val = tipo === 'ingreso'
+        ? { id: id, kind: 'ingreso', date: date, amount: monto, desc: desc || 'Ingreso', salary: false, via: 'siri', created: now }
+        : { id: id, kind: 'gasto', date: date, amount: monto, desc: desc, cat: cat, pocket: null, via: 'siri', created: now };
+      msg = 'Listo: ' + tipo + ' de ' + cop_(monto) + (desc ? ', ' + desc : '') + (tipo === 'gasto' ? ' (' + cat + ')' : '') + '.';
+    }
+    var seq = Number(p.getProperty('SEQ') || '0') + 1;
+    sh.appendRow([key, JSON.stringify(val), now, 0, Utilities.formatDate(new Date(), 'America/Bogota', "yyyy-MM-dd'T'HH:mm:ss"), 'atajo', seq]);
+    p.setProperty('SEQ', String(seq));
+    audit_('atajo_' + tipo, 'atajo', 1, 'ok');
+    return { ok: true, msg: msg, key: key };
+  } finally { lock.releaseLock(); }
 }
 
 // ---------------------------------------------------------------- respaldos
