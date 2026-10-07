@@ -307,6 +307,11 @@
     }
   }
 
+  async function api(action, payload) {
+    if (!sessionValid()) throw Object.assign(new Error('Inicia sesión primero.'), { code: 'auth' });
+    return call(action, Object.assign({ token: session.token }, payload || {}));
+  }
+
   async function serverStatus() {
     if (!sessionValid()) throw Object.assign(new Error('Inicia sesión primero.'), { code: 'auth' });
     return call('status', { token: session.token });
@@ -322,7 +327,7 @@
   window.FPCU_STORE = {
     config: C, device: device,
     get: get, list: list, put: put, del: del, tx: tx, count: count,
-    on: on, getState: getState, sync: sync, login: login, logout: logout, serverStatus: serverStatus,
+    on: on, getState: getState, sync: sync, login: login, logout: logout, serverStatus: serverStatus, api: api,
     exportData: exportData, previewImport: previewImport, importData: importData,
     wipeLocal: wipeLocal, redownload: redownload
   };
