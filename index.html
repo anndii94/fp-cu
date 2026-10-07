@@ -268,6 +268,8 @@ main{padding:0 16px calc(var(--dock-h) + 48px + env(safe-area-inset-bottom,0px))
 .steps li{padding:9px 0;border-bottom:.5px solid var(--sep)}
 .steps li:last-child{border-bottom:0}
 .steps code{font:500 var(--t-foot) ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--fill);padding:1px 5px;border-radius:5px}
+.pvrow{cursor:pointer}
+.pvrow .switch{margin-left:4px}
 .splitq{display:flex;align-items:center;gap:12px;margin:-6px 4px 14px}
 
 /* ---------- botones ---------- */
@@ -447,6 +449,12 @@ select.cv{text-align-last:right;padding-right:20px;color:var(--ink2);background-
 @keyframes aPop{from{transform:translateX(-24%);opacity:.3}}
 @keyframes aFade{from{opacity:0;transform:translateY(4px)}}
 
+.privacy{position:fixed;inset:0;z-index:120;display:grid;place-items:center;background:color-mix(in srgb,var(--bg) 62%,transparent);-webkit-backdrop-filter:blur(34px) saturate(140%);backdrop-filter:blur(34px) saturate(140%)}
+.pv-in{display:flex;flex-direction:column;align-items:center;gap:12px}
+.pv-in svg{border-radius:20px;box-shadow:0 12px 30px rgba(0,0,0,.25)}
+.pv-in b{font:700 var(--t-title3)/1 var(--font-num);letter-spacing:-.02em;color:var(--ink)}
+html.pv-on #app,html.pv-on .dock,html.pv-on .fab,html.pv-on .sheet-wrap{filter:blur(18px)}
+
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 @media (prefers-reduced-transparency:reduce){.dock,.fab,.pill,.circ,.top.scrolled,.selbar,#toast,.ask-card,.sheet{background:var(--cell);-webkit-backdrop-filter:none;backdrop-filter:none}}
 @media (max-width:360px){:root{--t-hero:38px;--t-large:30px;--t-title1:25px}.dock button{font-size:9px}}
@@ -507,6 +515,11 @@ select.cv{text-align-last:right;padding-right:20px;color:var(--ink2);background-
 </div>
 <input type="file" id="fileIn" accept="application/json,.json" hidden>
 <div id="toast" role="status" aria-live="polite"></div>
+<div class="privacy" id="privacy" hidden aria-hidden="true"><div class="pv-in"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="88" height="88" aria-hidden="true"><defs><radialGradient id="pv_glow" cx=".25" cy=".12" r=".8"><stop offset="0" stop-color="#fff" stop-opacity=".30"/><stop offset=".6" stop-color="#fff" stop-opacity="0"/></radialGradient>
+<linearGradient id="pv_rim" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".95"/><stop offset=".5" stop-color="#fff" stop-opacity=".25"/><stop offset="1" stop-color="#fff" stop-opacity=".7"/></linearGradient><linearGradient id="pv_bgA" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#123B35"/><stop offset="1" stop-color="#050C0B"/></linearGradient>
+<radialGradient id="pv_coreA" cx=".35" cy=".3" r=".8"><stop offset="0" stop-color="#fff" stop-opacity=".30"/><stop offset="1" stop-color="#fff" stop-opacity=".08"/></radialGradient></defs><rect width="1024" height="1024" rx="230" fill="url(#pv_bgA)"/><rect width="1024" height="1024" rx="230" fill="url(#pv_glow)"/>
+<circle cx="512" cy="512" r="300" fill="none" stroke="#fff" stroke-opacity=".07" stroke-width="96"/><path d="M584.6 220.9 A300 300 0 0 1 459.9 807.4" fill="none" stroke="#3EE0AE" stroke-width="86" stroke-linecap="round"/><path d="M344.2 760.7 A300 300 0 0 1 212.2 522.5" fill="none" stroke="#F2B84B" stroke-width="86" stroke-linecap="round"/><path d="M233.8 399.6 A300 300 0 0 1 327.3 275.6" fill="none" stroke="#A78BFA" stroke-width="86" stroke-linecap="round"/><path d="M439.4 220.9 A300 300 0 0 1 459.9 216.6" fill="none" stroke="#5CC8F0" stroke-width="86" stroke-linecap="round"/><circle cx="512" cy="512" r="178" fill="url(#pv_coreA)" stroke="url(#pv_rim)" stroke-width="6"/>
+<path d="M512 420 V604 M560 452 C548 430 528 424 508 424 C478 424 458 440 458 464 C458 516 566 500 566 556 C566 584 542 600 510 600 C484 600 464 590 454 568" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg><b>FP&amp;CU</b></div></div>
 <script src="config.js"></script>
 <script src="sync.js"></script>
 <script>
@@ -515,7 +528,7 @@ select.cv{text-align-last:right;padding-right:20px;color:var(--ink2);background-
 var S = window.FPCU_STORE;
 if (!S) { document.getElementById('view').innerHTML = '<p class="empty">No se pudo cargar sync.js. Revisa que el archivo esté en el repositorio.</p>'; return; }
 var CFG = S.config;
-var VERSION = '3.2.0';
+var VERSION = '3.2.1';
 
 /* ============================== utilidades ============================== */
 var $ = function (s, r) { return (r || document).querySelector(s); };
@@ -1427,13 +1440,14 @@ function vSettings(m) {
   if (st.mode === 'server') h += group('Siri y Atajos',
     row({ a: 'siriSetup', icon: 'mic', tone: 'pur', sq: true, t: 'Registrar con Siri', s: 'Gastos, compras e ingresos por voz, sin abrir la app', chev: true }));
   var hasPin = !!pinGet();
-  h += group('Seguridad', hasPin
+  var pvRow = '<label class="row pvrow"><span class="bdg sq" style="--bc:#5856D6">' + ic('scale') + '</span><span class="tx"><span class="t">Ocultar en la multitarea</span><span class="s">Difumina la app al cambiar de app o bajar el Centro de control</span></span><input class="switch" type="checkbox" role="switch" data-change="privacyToggle"' + (pvEnabled() ? ' checked' : '') + '></label>';
+  h += group('Seguridad', pvRow + (hasPin
     ? row({ a: 'pinChange', icon: 'check', tone: 'pos', t: 'PIN activado', s: 'Se pide al abrir y al volver después de 1 minuto. Toca para cambiarlo', chev: true }) +
       (bioGet() ? row({ a: 'bioOff', icon: 'person', tone: 'pos', t: 'Face ID activado', s: 'Toca para desactivarlo. El PIN sigue de respaldo' })
         : bioAvailable ? row({ a: 'bioOn', icon: 'person', tone: 'acc', t: 'Desbloquear con Face ID', s: 'Usa Face ID o Touch ID en vez del PIN', chev: true })
         : row({ icon: 'person', t: 'Face ID no disponible aquí', s: 'Funciona en la app instalada desde Safari, no en esta vista' })) +
       row({ a: 'pinRemove', icon: 'scale', t: 'Quitar PIN', s: 'Pide el PIN actual; también quita Face ID' })
-    : row({ a: 'pinSet', icon: 'gear', tone: 'acc', t: 'Activar PIN', s: '4 a 6 dígitos, solo en este dispositivo', chev: true }));
+    : row({ a: 'pinSet', icon: 'gear', tone: 'acc', t: 'Activar PIN', s: '4 a 6 dígitos, solo en este dispositivo', chev: true })));
   if (m.cfg) h += group('Apertura', row({ a: 'form', d: { kind: 'openingEdit' }, icon: 'scale', t: 'Libro desde el ' + fd(m.cfg.start), s: 'Saldo inicial ' + money(m.cfg.opening), chev: true }));
   h += group('Este dispositivo', '<div style="padding:12px 14px" class="stack"><p class="hint" style="margin:0">Id: ' + esc(st.device) + '</p><button class="btn line danger" data-a="wipe">Borrar datos de este dispositivo</button></div>');
   h += '<p class="note">Respaldo automático diario en Google Drive, carpeta FP&amp;CU Respaldos. Los archivos de respaldo se pueden importar aquí mismo.</p>';
@@ -2192,6 +2206,28 @@ document.addEventListener('visibilitychange', function () {
   else if (pinGet() && !pinActive() && pinHiddenAt && Date.now() - pinHiddenAt > 60000) pinOpen('unlock');
 });
 
+/* ============================== privacidad en la multitarea ==============================
+   iOS toma una imagen de la app al ir a la multitarea. Al perder el foco se cubre la pantalla
+   con un difuminado y un velo, sin animación, para que la imagen no muestre el contenido. */
+var PV_KEY = 'fpcu_privacy';
+function pvEnabled() { try { return localStorage.getItem(PV_KEY) !== '0'; } catch (e) { return true; } }
+var pvTouch = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
+function pvShow() {
+  if (!pvEnabled()) return;
+  var el = $('#privacy'); if (!el.hidden) return;
+  el.hidden = false; document.documentElement.classList.add('pv-on');
+}
+function pvHide() {
+  var el = $('#privacy'); if (el.hidden) return;
+  // un cuadro de espera para que, si toca, el PIN ya esté encima antes de quitar el velo
+  requestAnimationFrame(function () { el.hidden = true; document.documentElement.classList.remove('pv-on'); });
+}
+if (pvTouch) { window.addEventListener('blur', pvShow); window.addEventListener('focus', pvHide); }
+document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') pvShow(); else if (!pvTouch || document.hasFocus()) pvHide(); });
+window.addEventListener('pagehide', pvShow);
+window.addEventListener('pageshow', function () { if (document.visibilityState === 'visible') pvHide(); });
+document.addEventListener('freeze', pvShow);
+
 /* ============================== confirmación ============================== */
 function ask(msg, okLabel, danger) {
   return new Promise(function (resolve) {
@@ -2707,6 +2743,7 @@ document.addEventListener('input', function (e) {
   if (t.id === 'histQ') { ui.histQ = t.value; var l = $('#histList'); if (l) l.innerHTML = vHistList(model()); }
 });
 var CHANGE = {
+  privacyToggle: function (t) { try { localStorage.setItem(PV_KEY, t.checked ? '1' : '0'); } catch (e) { /* nada */ } toast(t.checked ? 'La app se difumina en la multitarea' : 'Difuminado desactivado'); },
   cardPrefill: function (t, f) { var m = model(); var s = firstPending(m, t.value); f.querySelector('[name="amount"]').value = s ? '$' + moneyInput(s.pending) : ''; var h = $('#cardHint'); if (h) h.textContent = cardHint(m, t.value); },
   cxcPrefill: function (t, f) { var c = model().cxcs.find(function (x) { return x.id === t.value; }); if (c) f.querySelector('[name="amount"]').value = '$' + moneyInput(c.pending); },
   quotaPrefill: function (t, f) { var x = openQuotas(model()).find(function (q) { return q.v === t.value; }); if (x) f.querySelector('[name="amount"]').value = '$' + moneyInput(x.q.amount); }
@@ -2714,7 +2751,7 @@ var CHANGE = {
 document.addEventListener('change', function (e) {
   var t = e.target, f = t.form;
   if (f) { applyShow(f); if (t.name === 'noInt' || t.name === 'card' || t.name === 'type') cuotasInfo(f); }
-  if (t.dataset && t.dataset.change && CHANGE[t.dataset.change] && f) CHANGE[t.dataset.change](t, f);
+  if (t.dataset && t.dataset.change && CHANGE[t.dataset.change]) CHANGE[t.dataset.change](t, f);
 });
 document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && sheetOpen) closeSheet(); });
 $('#fileIn').addEventListener('change', function (e) {
