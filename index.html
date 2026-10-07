@@ -270,6 +270,8 @@ main{padding:0 16px calc(var(--dock-h) + 48px + env(safe-area-inset-bottom,0px))
 .steps code{font:500 var(--t-foot) ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--fill);padding:1px 5px;border-radius:5px}
 .pvrow{cursor:pointer}
 .pvrow .switch{margin-left:4px}
+.srv-link{display:block;margin:18px auto 0;font-size:var(--t-sub)}
+.srv-box{margin-top:12px}
 .splitq{display:flex;align-items:center;gap:12px;margin:-6px 4px 14px}
 
 /* ---------- botones ---------- */
@@ -493,6 +495,12 @@ html.pv-on #app,html.pv-on .dock,html.pv-on .fab,html.pv-on .sheet-wrap{filter:b
       <button class="btn line" type="button" data-a="skipLock">Seguir sin conexión</button>
     </div>
     <p class="err" id="lockErr" role="alert"></p>
+    <button type="button" class="link srv-link" data-a="srvToggle">¿Esta app es de otra persona? Usa su servidor</button>
+    <div class="srv-box" id="srvBox" hidden>
+      <label class="fld"><span>Dirección del servidor (termina en /exec)</span><input name="srv" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://script.google.com/macros/s/…/exec"></label>
+      <button type="button" class="btn line block" data-a="srvSave">Guardar servidor</button>
+      <p class="hint" style="margin:8px 4px 0">Se guarda solo en este celular. Luego entras con la clave de ese servidor.</p>
+    </div>
   </form>
 </div>
 
@@ -528,7 +536,7 @@ html.pv-on #app,html.pv-on .dock,html.pv-on .fab,html.pv-on .sheet-wrap{filter:b
 var S = window.FPCU_STORE;
 if (!S) { document.getElementById('view').innerHTML = '<p class="empty">No se pudo cargar sync.js. Revisa que el archivo esté en el repositorio.</p>'; return; }
 var CFG = S.config;
-var VERSION = '3.2.1';
+var VERSION = '3.3.0';
 
 /* ============================== utilidades ============================== */
 var $ = function (s, r) { return (r || document).querySelector(s); };
@@ -1429,9 +1437,11 @@ function vSettings(m) {
     lines.push(['Registros en la base central', st.serverTotal == null ? 'Sin consultar' : String(st.serverTotal)]);
   }
   lines.push(['Registros en este dispositivo', String(st.localCount)]);
+  if (st.mode === 'server' || S.serverInfo().own) lines.push(['Servidor', S.serverInfo().own ? 'Propio de este celular' : 'Predeterminado']);
   var sync = '<div style="padding:4px 14px 2px">' + lines.map(function (l) { return '<div class="kv"><span>' + l[0] + '</span><b style="text-align:right">' + l[1] + '</b></div>'; }).join('') + '</div><div style="padding:6px 14px 14px" class="stack">' +
     (st.mode === 'server' ? (st.sessionValid ? '<button class="btn primary" data-a="syncNow">Sincronizar ahora</button>' : '<button class="btn primary" data-a="showLock">Entrar con mi clave</button>') : '') +
     '<button class="btn line" data-a="import">Importar apertura o respaldo JSON</button>' +
+    (CFG.demo ? '' : '<button class="btn line" data-a="srvSheet">Cambiar servidor</button>') +
     '<button class="btn line" data-a="export">Exportar JSON</button>' +
     (st.mode === 'server' && st.sessionValid ? '<button class="btn line" data-a="redownload">Descargar todo de nuevo</button><button class="btn line danger" data-a="logout">Cerrar sesión en este dispositivo</button>' : '') +
     '</div>';
@@ -2503,6 +2513,30 @@ var ACT = {
     ui.fxSel = null; toast(list.length + ' gastos fijos pagados');
   },
   noop: function () {},
+  srvToggle: function () { var b = $('#srvBox'); b.hidden = !b.hidden; if (!b.hidden) b.querySelector('input').focus(); },
+  srvSave: function (d, el) {
+    var box = el.closest('.srv-box, form, .sheet') || document, inp = box.querySelector('[name="srv"]'), url = (inp && inp.value || '').trim();
+    var errEl = $('#lockErr'); if (errEl && !$('#lock').hidden) errEl.textContent = '';
+    el.disabled = true;
+    S.pingServer(url).then(function () {
+      var go2 = function () { S.setServer(url); toast('Servidor guardado'); setTimeout(function () { location.reload(); }, 600); };
+      if (S.count() > 0) ask('Cambiar de servidor borra los datos de ESTE celular (los del servidor anterior no se tocan).\n¿Continuar?', 'Cambiar', true).then(function (ok) { if (ok) go2(); else el.disabled = false; });
+      else go2();
+    }).catch(function (e) {
+      el.disabled = false;
+      if (errEl && !$('#lock').hidden) errEl.textContent = e.message; else toast(e.message, 'err');
+    });
+  },
+  srvSheet: function () {
+    var si = S.serverInfo();
+    openSheet('<h2>Servidor</h2><p class="lead">Cada persona usa su propia hoja en su Drive. Cambiar el servidor borra los datos de este celular; los del servidor no se tocan.</p>' +
+      '<div class="box" style="padding:0 14px;margin-bottom:14px">' + kv('En uso', si.own ? 'Propio de este celular' : 'Predeterminado (config.js)') + '</div>' +
+      '<div class="srv-box"><label class="fld"><span>Nueva dirección (termina en /exec)</span><input name="srv" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://script.google.com/macros/s/…/exec"></label>' +
+      '<div class="actions"><button type="button" class="btn primary" data-a="srvSave">Probar y guardar</button>' + (si.own ? '<button type="button" class="btn" data-a="srvDefault">Volver al predeterminado</button>' : '') + '</div></div>');
+  },
+  srvDefault: function () {
+    ask('¿Volver al servidor predeterminado?\nSe borran los datos de este celular.', 'Volver', true).then(function (ok) { if (!ok) return; S.setServer(null); toast('Servidor predeterminado'); setTimeout(function () { location.reload(); }, 600); });
+  },
   siriSetup: function () { siriSheet(null); },
   siriKey: function () {
     S.api('shortcutKey').then(function (j) { siriSheet(j.key); toast('Llave creada'); })

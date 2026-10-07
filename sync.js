@@ -15,6 +15,12 @@
     window.FPCU_CONFIG || {}
   );
 
+  // Servidor propio guardado en este dispositivo (por ejemplo, la hoja de otra persona).
+  const SERVER_KEY = 'fpcu_server_v1';
+  const DEFAULT_SERVER = C.serverUrl;
+  try { const own = localStorage.getItem(SERVER_KEY); if (own) C.serverUrl = own; } catch (e) { /* nada */ }
+  const SERVER_RE = /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/;
+
   const K = {
     db: 'fpcu_db_v2',
     queue: 'fpcu_sync_queue_v2',
@@ -312,6 +318,25 @@
     return call(action, Object.assign({ token: session.token }, payload || {}));
   }
 
+  async function pingServer(url) {
+    url = String(url || '').trim();
+    if (!SERVER_RE.test(url)) throw Object.assign(new Error('La dirección debe empezar por https://script.google.com/macros/s/ y terminar en /exec'), { code: 'bad' });
+    let j;
+    try {
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action: 'ping' }), redirect: 'follow', cache: 'no-store' });
+      j = await res.json();
+    } catch (e) { throw Object.assign(new Error('No se pudo conectar con ese servidor. Revisa la dirección y que la implementación tenga acceso "Cualquier usuario".'), { code: 'net' }); }
+    if (!j || !j.ok || j.app !== 'FPCU') throw Object.assign(new Error('Esa dirección no es un servidor de FP&CU.'), { code: 'bad' });
+    return true;
+  }
+  // Cambiar de servidor borra lo local de este dispositivo para no mezclar datos de dos personas.
+  function setServer(url) {
+    session = null; ls.del(K.session);
+    wipeLocal();
+    try { if (url && url !== DEFAULT_SERVER) localStorage.setItem(SERVER_KEY, url); else localStorage.removeItem(SERVER_KEY); } catch (e) { /* nada */ }
+  }
+  function serverInfo() { return { url: C.serverUrl, own: C.serverUrl !== DEFAULT_SERVER, defaultUrl: DEFAULT_SERVER }; }
+
   async function serverStatus() {
     if (!sessionValid()) throw Object.assign(new Error('Inicia sesión primero.'), { code: 'auth' });
     return call('status', { token: session.token });
@@ -328,6 +353,7 @@
     config: C, device: device,
     get: get, list: list, put: put, del: del, tx: tx, count: count,
     on: on, getState: getState, sync: sync, login: login, logout: logout, serverStatus: serverStatus, api: api,
+    pingServer: pingServer, setServer: setServer, serverInfo: serverInfo,
     exportData: exportData, previewImport: previewImport, importData: importData,
     wipeLocal: wipeLocal, redownload: redownload
   };
