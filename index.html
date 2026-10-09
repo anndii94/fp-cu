@@ -452,6 +452,40 @@ select.cv{text-align-last:right;padding-right:20px;color:var(--ink2);background-
 @keyframes aPop{from{transform:translateX(-24%);opacity:.3}}
 @keyframes aFade{from{opacity:0;transform:translateY(4px)}}
 
+/* ---------- respuesta al tocar ---------- */
+.btn,.chip,.tile,.fab,.circ,.proj,.wcard,.seg button,.catpick button,.mswitch button,.dock button,.tick,.keys button,.copyc,.sw,.back,.pill,.link,.swipe-del{transition:transform .32s cubic-bezier(.3,.9,.3,1.25),background-color .4s ease,opacity .35s ease,filter .35s ease}
+.row,.fxbody,.kvb,.lgb,.opts label{transition:background-color .45s ease}
+.pressed,.pressed *{transition:none!important}
+.row.pressed,.fxbody.pressed,.kvb.pressed,.lgb.pressed,.copyc.pressed{background:var(--cell2)}
+:root[data-dark="1"] .row.pressed,:root[data-dark="1"] .fxbody.pressed,:root[data-dark="1"] .kvb.pressed,:root[data-dark="1"] .lgb.pressed,:root[data-dark="1"] .copyc.pressed{background:#3A3A3C}
+.btn.pressed{transform:scale(.96);filter:brightness(.88)}
+:root[data-dark="1"] .btn.pressed{filter:brightness(1.25)}
+.actions .btn.pressed{transform:none;background:var(--cell2)}
+.chip.pressed,.catpick button.pressed{transform:scale(.93)}
+.tile.pressed{transform:scale(.96);background:var(--cell2)}
+.fab.pressed{transform:scale(.86)}
+.circ.pressed{transform:scale(.86)}
+.dock button.pressed{transform:scale(.88)}
+.tick.pressed{transform:scale(.78)}
+.proj.pressed{transform:scale(.98);background:var(--cell2)}
+.wcard.pressed{transform:scale(.97)}
+.seg button.pressed,.mswitch button.pressed,.opts label.pressed{opacity:.55}
+.link.pressed,.back.pressed,.pill.pressed{opacity:.4}
+.swipe-del.pressed{filter:brightness(.85)}
+/* teclas del código, como la pantalla de bloqueo del iPhone */
+.keys button{transition:background-color .45s ease,transform .32s cubic-bezier(.3,.9,.3,1.25)}
+.keys button.pressed{background:color-mix(in srgb,var(--ink) 34%,transparent);transform:scale(.93)}
+:root[data-dark="1"] .keys button.pressed{background:color-mix(in srgb,var(--ink) 42%,transparent)}
+.keys button.pressed small{opacity:.9}
+.keys .k-ok.pressed,.keys .k-del.pressed{background:none;transform:scale(.9);opacity:.45}
+.dots i{transition:background-color .15s,border-color .15s}
+.dots i.pop{animation:dotIn .22s cubic-bezier(.3,1.7,.5,1)}
+@keyframes dotIn{from{transform:scale(.25)}}
+.dots.ok i{background:var(--c-green);border-color:var(--c-green)}
+/* círculos que se marcan */
+.tick.on.pop{animation:tickPop .38s cubic-bezier(.3,1.7,.5,1)}
+@keyframes tickPop{0%{transform:scale(.55)}100%{transform:scale(1)}}
+
 .privacy{position:fixed;inset:0;z-index:120;display:grid;place-items:center;background:color-mix(in srgb,var(--bg) 62%,transparent);-webkit-backdrop-filter:blur(34px) saturate(140%);backdrop-filter:blur(34px) saturate(140%)}
 .pv-in{display:flex;flex-direction:column;align-items:center;gap:12px}
 .pv-in svg{border-radius:20px;box-shadow:0 12px 30px rgba(0,0,0,.25)}
@@ -537,7 +571,7 @@ html.pv-on #app,html.pv-on .dock,html.pv-on .fab,html.pv-on .sheet-wrap{filter:b
 var S = window.FPCU_STORE;
 if (!S) { document.getElementById('view').innerHTML = '<p class="empty">No se pudo cargar sync.js. Revisa que el archivo esté en el repositorio.</p>'; return; }
 var CFG = S.config;
-var VERSION = '3.4.0';
+var VERSION = '3.4.1';
 
 /* ============================== utilidades ============================== */
 var $ = function (s, r) { return (r || document).querySelector(s); };
@@ -1066,7 +1100,7 @@ function salaryRow(pc) {
       var done = !!x.paid, name = (x.q === 1 ? 'Primera' : 'Segunda') + ' quincena';
       var sub = done ? 'Recibida el ' + fd(x.paid.date) + '. Toca para editar' : '¿Ya te pagaron? Marca el círculo o toca para otro valor';
       return '<div class="row fxrow">' +
-        '<button type="button" class="tick' + (done ? ' on' : '') + '" data-a="salaryToggle" data-mo="' + mo + '" data-q="' + x.q + '" aria-label="' + (done ? 'Desmarcar ' : 'Marcar recibida ') + name + '">' + ic('check') + '</button>' +
+        '<button type="button" class="tick' + (done ? ' on' : '') + (ui.pop === 'sal|' + mo + '|' + x.q ? ' pop' : '') + '" data-a="salaryToggle" data-mo="' + mo + '" data-q="' + x.q + '" aria-label="' + (done ? 'Desmarcar ' : 'Marcar recibida ') + name + '">' + ic('check') + '</button>' +
         '<button type="button" class="fxbody" data-a="salaryOpen" data-mo="' + mo + '" data-q="' + x.q + '"><span class="tx"><span class="t">' + name + '</span><span class="s">' + sub + '</span></span>' +
         '<span class="amt pos">+' + money(x.amount) + '</span></button></div>';
     }).join('');
@@ -1075,7 +1109,7 @@ function salaryRow(pc) {
   var sub = done ? 'Recibido el ' + fd(pc.salary[0].date) + (pc.salary.length > 1 ? ' y ' + (pc.salary.length - 1) + ' pago más' : '') + '. Toca para editar'
     : '¿Ya te pagaron? Marca el círculo o toca para otro valor';
   return '<div class="row fxrow">' +
-    '<button type="button" class="tick' + (done ? ' on' : '') + '" data-a="salaryToggle" data-mo="' + mo + '" aria-label="' + (done ? 'Desmarcar sueldo' : 'Marcar sueldo recibido') + '">' + ic('check') + '</button>' +
+    '<button type="button" class="tick' + (done ? ' on' : '') + (ui.pop === 'sal|' + mo + '|' ? ' pop' : '') + '" data-a="salaryToggle" data-mo="' + mo + '" aria-label="' + (done ? 'Desmarcar sueldo' : 'Marcar sueldo recibido') + '">' + ic('check') + '</button>' +
     '<button type="button" class="fxbody" data-a="salaryOpen" data-mo="' + mo + '"><span class="tx"><span class="t">Sueldo de ' + fmShort(mo) + '</span><span class="s">' + sub + '</span></span>' +
     '<span class="amt pos">+' + money(done ? pc.income : pc.incomePlanned) + '</span></button></div>';
 }
@@ -1270,7 +1304,7 @@ function fxRow(f, mo, sel) {
       '<button type="button" class="fxbody" data-a="fxOpen" data-mo="' + mo + '" data-id="' + f.id + '"><span class="tx"><span class="t">' + esc(f.name) + '<span class="tag">automático</span>' + (f.late ? '<span class="tag warn">vencido</span>' : '') + '</span><span class="s">' + esc(st) + '</span></span>' +
       '<span class="amt' + (f.paid ? ' pos' : '') + '">' + money(f.amount) + '</span></button></div>';
   }
-  var state = f.paid ? 'on' : f.skipped ? 'skip' : '';
+  var state = (f.paid ? 'on' : f.skipped ? 'skip' : '') + (ui.pop === mo + '|' + f.id ? ' pop' : '');
   var picked = sel && sel.indexOf(f.id) >= 0;
   var tick = sel
     ? (f.paid || f.skipped ? '<span class="tick ' + state + '" aria-hidden="true">' + ic('check') + '</span>' : '<button type="button" class="tick pick' + (picked ? ' on' : '') + '" data-a="fxPick" data-id="' + f.id + '" aria-pressed="' + picked + '" aria-label="Seleccionar ' + esc(f.name) + '">' + ic('check') + '</button>')
@@ -1505,7 +1539,7 @@ function vSettings(m) {
   if (st.mode === 'server') h += group('Siri y Atajos',
     row({ a: 'siriSetup', icon: 'mic', tone: 'pur', sq: true, t: 'Registrar con Siri', s: 'Gastos, compras e ingresos por voz, sin abrir la app', chev: true }));
   var hasPin = !!pinGet();
-  var pvRow = '<label class="row pvrow"><span class="bdg sq" style="--bc:#5856D6">' + ic('scale') + '</span><span class="tx"><span class="t">Ocultar en la multitarea</span><span class="s">Difumina la app al cambiar de app o bajar el Centro de control</span></span><input class="switch" type="checkbox" role="switch" data-change="privacyToggle"' + (pvEnabled() ? ' checked' : '') + '></label>';
+  var pvRow = '<label class="row pvrow"><span class="bdg sq" style="--bc:#5856D6">' + ic('scale') + '</span><span class="tx"><span class="t">Ocultar en la multitarea</span><span class="s">Difumina la app al cambiar de app o bajar el Centro de control</span></span><input class="switch" type="checkbox" switch role="switch" data-change="privacyToggle"' + (pvEnabled() ? ' checked' : '') + '></label>';
   h += group('Seguridad', pvRow + (hasPin
     ? row({ a: 'pinChange', icon: 'check', tone: 'pos', t: 'PIN activado', s: 'Se pide al abrir y al volver después de 1 minuto. Toca para cambiarlo', chev: true }) +
       (bioGet() ? row({ a: 'bioOff', icon: 'person', tone: 'pos', t: 'Face ID activado', s: 'Toca para desactivarlo. El PIN sigue de respaldo' })
@@ -1553,7 +1587,7 @@ function fCats(v, cats) {
 function fOpts(n, opts, v) {
   return '<div class="fld"><div class="opts">' + opts.map(function (o) { return '<label><input type="radio" name="' + n + '" value="' + o[0] + '"' + (o[0] === v ? ' checked' : '') + '><span>' + o[1] + '</span></label>'; }).join('') + '</div></div>';
 }
-function fCheck(n, label, on) { return '<label class="cell sw"><span class="cl">' + label + '</span><input class="switch" type="checkbox" role="switch" name="' + n + '" value="1"' + (on ? ' checked' : '') + '></label>'; }
+function fCheck(n, label, on) { return '<label class="cell sw"><span class="cl">' + label + '</span><input class="switch" type="checkbox" switch role="switch" name="' + n + '" value="1"' + (on ? ' checked' : '') + '></label>'; }
 function delBtn(k, label) { return '<button type="button" class="btn danger" data-a="del" data-k="' + k + '">' + (label || 'Borrar') + '</button>'; }
 function sheetHead(title, submitLabel) {
   return '<div class="sh-head"><button type="button" class="circ" data-a="close" aria-label="Cerrar">' + ic('x') + '</button><h2>' + title + '</h2>' +
@@ -2163,7 +2197,7 @@ function pinDraw(msg, isErr) {
   if (st.mode === 'new' || st.mode === 'confirm') len = Math.max(4, st.buf.length);
   var titles = { unlock: 'Ingresa tu PIN', verify: 'Ingresa tu PIN actual', 'new': 'Crea un PIN de 4 a 6 dígitos', confirm: 'Repite el PIN' };
   $('#pinTitle').textContent = titles[st.mode] || '';
-  var dots = ''; for (var i = 0; i < len; i++) dots += '<i class="' + (i < st.buf.length ? 'on' : '') + '"></i>';
+  var dots = ''; for (var i = 0; i < len; i++) dots += '<i class="' + (i < st.buf.length ? 'on' : '') + (i === st.buf.length - 1 && st.lastAdd ? ' pop' : '') + '"></i>';
   $('#pinDots').innerHTML = dots;
   var m = $('#pinMsg'); m.textContent = msg || ''; m.className = 'pin-msg' + (isErr ? ' err' : '');
   $('#pin .k-ok').hidden = !(st.mode === 'new' || st.mode === 'confirm');
@@ -2196,11 +2230,11 @@ function pinCheck() {
   pinBusy = true;
   pinHash(pinState.buf, rec.salt).then(function (h) {
     pinBusy = false;
-    if (h !== rec.hash) return pinFail();
+    if (h !== rec.hash) { haptic(true); return pinFail(); }
     lsSet(PIN_FAIL, null);
     var done = pinState.done, mode = pinState.mode;
-    pinClose();
-    if (mode === 'verify' && done) done();
+    $('#pinDots').classList.add('ok'); pinBusy = true;
+    setTimeout(function () { pinBusy = false; $('#pinDots').classList.remove('ok'); pinClose(); if (mode === 'verify' && done) done(); }, 140);
   });
 }
 function pinSave(pin) {
@@ -2226,7 +2260,7 @@ function pinPress(k) {
     return;
   }
   if (!/^\d$/.test(k) || st.buf.length >= 6) return;
-  st.buf += k; pinDraw();
+  st.buf += k; st.lastAdd = true; pinDraw(); st.lastAdd = false;
   var rec = pinGet();
   if ((st.mode === 'unlock' || st.mode === 'verify') && rec && st.buf.length >= rec.len) pinCheck();
 }
@@ -2299,6 +2333,47 @@ document.addEventListener('visibilitychange', function () {
   if (document.visibilityState === 'hidden') pinHiddenAt = Date.now();
   else if (pinGet() && !pinActive() && pinHiddenAt && Date.now() - pinHiddenAt > 60000) pinOpen('unlock');
 });
+
+/* ============================== respuesta al tocar ==============================
+   iOS solo pinta :active si la página escucha toques; además se marca .pressed al instante
+   y se suelta con una transición suave, como en las apps nativas. */
+var hapticEl = null;
+function haptic(strong) {
+  try {
+    if (navigator.vibrate) { navigator.vibrate(strong ? [12, 40, 12] : 8); return; }
+    // iOS 18+: cambiar un interruptor nativo produce un toque háptico.
+    if (!hapticEl) {
+      hapticEl = document.createElement('label'); hapticEl.setAttribute('aria-hidden', 'true'); hapticEl.style.display = 'none';
+      var inp = document.createElement('input'); inp.type = 'checkbox'; inp.setAttribute('switch', ''); inp.tabIndex = -1;
+      hapticEl.appendChild(inp); document.body.appendChild(hapticEl);
+    }
+    hapticEl.click();
+    if (strong) setTimeout(function () { hapticEl.click(); }, 90);
+  } catch (e) { /* sin háptica */ }
+}
+var PRESS_SEL = '.keys button,.row,.fxbody,.btn,.chip,.tile,.tick,.dock button,.fab,.circ,.proj,.wcard,.seg button,.catpick button,.opts label,.mswitch button,.kvb,.lgb,.copyc,.sw,.swipe-del,.link,.back,.pill';
+var HAPTIC_SEL = '.keys button,.tick,.fab,.dock button,.circ.tint,.swipe-del';
+var pressEl = null, pressAt = 0, pressX = 0, pressY = 0;
+function pressOff() { if (pressEl) { pressEl.classList.remove('pressed'); pressEl = null; } }
+document.addEventListener('touchstart', function () {}, { passive: true });
+document.addEventListener('pointerdown', function (e) {
+  var el = e.target.closest && e.target.closest(PRESS_SEL);
+  if (!el || el.disabled || el.closest('[hidden]')) return;
+  pressOff(); pressEl = el; pressAt = Date.now(); pressX = e.clientX; pressY = e.clientY;
+  el.classList.add('pressed');
+  if (el.matches(HAPTIC_SEL)) haptic();
+}, { passive: true });
+document.addEventListener('pointermove', function (e) {
+  if (pressEl && (Math.abs(e.clientX - pressX) > 10 || Math.abs(e.clientY - pressY) > 10)) pressOff();
+}, { passive: true });
+['pointerup', 'pointercancel'].forEach(function (t) {
+  document.addEventListener(t, function () {
+    var el = pressEl; pressEl = null; if (!el) return;
+    // que el resalte se alcance a ver aunque el toque sea muy rápido
+    setTimeout(function () { el.classList.remove('pressed'); }, Math.max(0, 110 - (Date.now() - pressAt)));
+  }, { passive: true });
+});
+window.addEventListener('scroll', pressOff, { passive: true });
 
 /* ============================== privacidad en la multitarea ==============================
    iOS toma una imagen de la app al ir a la multitarea. Al perder el foco se cubre la pantalla
@@ -2568,6 +2643,7 @@ var ACT = {
   },
   fxFilter: function (d) { ui.fxFilter = d.f; render(); },
   fxToggle: function (d) {
+    ui.pop = d.mo + '|' + d.id; setTimeout(function () { ui.pop = null; }, 600);
     var m = model(), pc = planCalc(m, d.mo), f = pc && pc.fixed.find(function (x) { return x.id === d.id; }); if (!f) return;
     if (f.auto) {
       if (f.paid) return toast('Se marca sola cuando la tarjeta queda pagada');
@@ -2642,6 +2718,7 @@ var ACT = {
   bioOn: function () { bioEnable().then(function () { toast('Face ID activado'); queueRender(); }).catch(function (e) { toast(e && e.name === 'NotAllowedError' ? 'Se canceló la activación de Face ID' : (e.message || 'No se pudo activar Face ID'), 'err'); }); },
   bioOff: function () { ask('¿Desactivar Face ID? Seguirás entrando con tu PIN.', 'Desactivar').then(function (ok) { if (ok) { lsSet(BIO_KEY, null); toast('Face ID desactivado'); queueRender(); } }); },
   salaryToggle: function (d) {
+    ui.pop = 'sal|' + d.mo + '|' + (d.q || ''); setTimeout(function () { ui.pop = null; }, 600);
     var m = model(), mo = d.mo, pc = planCalc(m, mo), cM = ymOf(m.today); if (!pc) return;
     var dt = mo === cM ? m.today : (mo < cM ? (d.q === '1' ? mo + '-15' : lastDay(mo)) : m.today);
     if (pc.payFreq === 'quincenal' && d.q) {
