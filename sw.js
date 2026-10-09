@@ -1,5 +1,5 @@
 /* FP&CU v2 — service worker: red primero para la app, caché para lo demás. */
-const CACHE = 'fpcu-v3.3.0';
+const CACHE = 'fpcu-v3.4.0';
 const CORE = ['./', './index.html', './config.js', './sync.js', './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png', './icons/apple-touch-icon.png'];
 const NETWORK_FIRST = /(\/|index\.html|config\.js|sync\.js)$/;
 

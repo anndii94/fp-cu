@@ -272,6 +272,7 @@ main{padding:0 16px calc(var(--dock-h) + 48px + env(safe-area-inset-bottom,0px))
 .pvrow .switch{margin-left:4px}
 .srv-link{display:block;margin:18px auto 0;font-size:var(--t-sub)}
 .srv-box{margin-top:12px}
+.row.wrap .tx .s{white-space:normal;line-height:1.35}
 .splitq{display:flex;align-items:center;gap:12px;margin:-6px 4px 14px}
 
 /* ---------- botones ---------- */
@@ -536,7 +537,7 @@ html.pv-on #app,html.pv-on .dock,html.pv-on .fab,html.pv-on .sheet-wrap{filter:b
 var S = window.FPCU_STORE;
 if (!S) { document.getElementById('view').innerHTML = '<p class="empty">No se pudo cargar sync.js. Revisa que el archivo esté en el repositorio.</p>'; return; }
 var CFG = S.config;
-var VERSION = '3.3.0';
+var VERSION = '3.4.0';
 
 /* ============================== utilidades ============================== */
 var $ = function (s, r) { return (r || document).querySelector(s); };
@@ -567,7 +568,7 @@ function installments(amount, n, ratePct) {
   }
   return { n: n, list: list, interest: interest, total: r2(amount + interest), first: list[0].total };
 }
-function parseRate(v) { var n = Number(String(v || '').replace(/[^\d,.]/g, '').replace(',', '.')); return isFinite(n) ? Math.min(15, Math.max(0, n)) : 0; }
+function parseRate(v, max) { var n = Number(String(v || '').replace(/[^\d,.]/g, '').replace(',', '.')); return isFinite(n) ? Math.min(max || 15, Math.max(0, n)) : 0; }
 function fmtRate(n) { n = Number(n) || 0; return String(Math.round(n * 1000) / 1000).replace('.', ','); }
 function lastDay(ym) { var p = ym.split('-').map(Number); return ymd(p[0], p[1], dim(p[0], p[1])); }
 var MES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
@@ -670,7 +671,31 @@ function cycleOf(card, ds) {
   return { cut: ymd(y, m, Math.min(cut, dim(y, m))), due: ymd(py, pm, Math.min(pay, dim(py, pm))) };
 }
 
+// Tasa por periodo: EA o mensual (MV) llevada a la frecuencia de pago.
+function debtRate(d) {
+  var r = Math.max(0, Number(d.rate) || 0) / 100, every = parseInt(d.every, 10) || 1;
+  var monthly = d.rateType === 'ea' ? Math.pow(1 + r, 1 / 12) - 1 : r;
+  return Math.pow(1 + monthly, every) - 1;
+}
+// Crédito con cuota fija (sistema francés), como los créditos de consumo y libranza.
+function creditPlan(principal, n, i, ins) {
+  principal = Number(principal) || 0; n = Math.max(1, parseInt(n, 10) || 1); ins = Number(ins) || 0;
+  var cuota = i > 0 ? principal * i / (1 - Math.pow(1 + i, -n)) : principal / n;
+  cuota = Math.round(cuota);
+  var saldo = principal, list = [], intTot = 0;
+  for (var k = 1; k <= n; k++) {
+    var int = Math.round(saldo * i), cap = k < n ? r2(cuota - int) : r2(saldo);
+    var pay = k < n ? cuota : r2(cap + int);
+    saldo = r2(saldo - cap); intTot = r2(intTot + int);
+    list.push({ k: k, int: int, cap: cap, ins: ins, amount: r2(pay + ins), saldo: Math.max(0, saldo) });
+  }
+  return { cuota: cuota, cuotaTotal: r2(cuota + ins), list: list, interest: intTot, total: r2(list.reduce(function (t, q) { return t + q.amount; }, 0)) };
+}
 function debtSchedule(d) {
+  if (d.kind === 'credito') {
+    var cp = creditPlan(d.total, d.n, debtRate(d), d.ins), ev = parseInt(d.every, 10) || 1;
+    return cp.list.map(function (q) { return Object.assign(q, { date: addMonthsDate(d.first || todayStr(), (q.k - 1) * ev) }); });
+  }
   var n = Math.max(1, parseInt(d.n, 10) || 1), total = Number(d.total) || 0, every = parseInt(d.every, 10) || 1;
   var base = Number.isInteger(total) ? Math.floor(total / n) : Math.floor(total / n * 100) / 100;
   var out = [], acc = 0;
@@ -756,7 +781,11 @@ function model() {
   var debtList = debts.map(function (d) {
     var sch = debtSchedule(d).map(function (q) { return Object.assign(q, { paid: qPaid[d.id + '|' + q.k] || null }); });
     var paidAmt = r2(sch.filter(function (q) { return q.paid; }).reduce(function (t, q) { return t + (Number(q.paid.amount) || 0); }, 0));
-    return Object.assign({}, d, { sch: sch, paidCount: sch.filter(function (q) { return q.paid; }).length, paidAmt: paidAmt, remaining: r2(Math.max(0, (Number(d.total) || 0) - paidAmt)), next: sch.find(function (q) { return !q.paid; }) || null });
+    var toPay = r2(sch.reduce(function (t, q) { return t + q.amount; }, 0));
+    var remaining = d.kind === 'credito' ? r2(sch.filter(function (q) { return !q.paid; }).reduce(function (t, q) { return t + q.amount; }, 0)) : r2(Math.max(0, (Number(d.total) || 0) - paidAmt));
+    var lastPaid = null; sch.forEach(function (q) { if (q.paid) lastPaid = q; });
+    var capital = d.kind === 'credito' ? (lastPaid ? lastPaid.saldo : Number(d.total) || 0) : null;
+    return Object.assign({}, d, { sch: sch, toPay: toPay, capital: capital, paidCount: sch.filter(function (q) { return q.paid; }).length, paidAmt: paidAmt, remaining: remaining, next: sch.find(function (q) { return !q.paid; }) || null });
   });
 
   var pkList = pockets.map(function (p) { return Object.assign({}, p, { bal: r2(pk[p.id] || 0) }); });
@@ -813,7 +842,22 @@ function planCalc(m, mo) {
   var inMonth = m.movs.filter(function (x) { return ymOf(x.date) === mo && x.date >= m.start && !x.hist; });
   var salary = m.movs.filter(function (x) { return x.kind === 'ingreso' && x.salary && (x.month || ymOf(x.date)) === mo && x.date >= m.start; });
   var salaryAmt = r2(salary.reduce(function (t, x) { return t + (Number(x.amount) || 0); }, 0));
-  var income = salary.length ? salaryAmt : incomePlanned;
+  var payFreq = p && p.payFreq === 'quincenal' ? 'quincenal' : 'mensual';
+  var income, incomeLeft, quincenas = null, salaryDone;
+  if (payFreq === 'quincenal') {
+    // Dos pagos al mes. Cada quincena recibida cuenta por lo que llegó; la que falta, por la mitad del previsto.
+    var half = r2(incomePlanned / 2), qs = [null, null];
+    salary.forEach(function (x) { var k = x.q === 2 ? 1 : x.q === 1 ? 0 : -1; if (k >= 0 && !qs[k]) qs[k] = x; });
+    salary.forEach(function (x) { if (qs.indexOf(x) < 0) { var free = qs[0] ? (qs[1] ? -1 : 1) : 0; if (free >= 0) qs[free] = x; } });
+    quincenas = [1, 2].map(function (k) { var mv = qs[k - 1]; return { q: k, paid: mv, planned: k === 1 ? half : r2(incomePlanned - half), amount: mv ? Number(mv.amount) || 0 : (k === 1 ? half : r2(incomePlanned - half)) }; });
+    income = r2(quincenas[0].amount + quincenas[1].amount);
+    incomeLeft = r2(quincenas.filter(function (x) { return !x.paid; }).reduce(function (t, x) { return t + x.planned; }, 0));
+    salaryDone = !!(qs[0] && qs[1]);
+  } else {
+    income = salary.length ? salaryAmt : incomePlanned;
+    incomeLeft = salary.length ? 0 : incomePlanned;
+    salaryDone = salary.length > 0;
+  }
   var otherIncome = r2(inMonth.filter(function (x) { return x.kind === 'ingreso' && !x.salary; }).reduce(function (t, x) { return t + (Number(x.amount) || 0); }, 0));
   var variosList = inMonth.filter(function (x) { return x.kind === 'gasto' && !x.fixed && !x.pocket; });
   var varios = r2(variosList.reduce(function (t, x) { return t + (Number(x.amount) || 0); }, 0));
@@ -862,7 +906,7 @@ function planCalc(m, mo) {
   var quotaTotal = r2(quotas.reduce(function (t, x) { return t + (x.q.paid ? Number(x.q.paid.amount) || 0 : x.q.amount); }, 0));
   var res = {
     mo: mo, entry: r2(entry), entryKind: entryKind, plan: p, own: !!(p && p.month === mo), income: income,
-    incomePlanned: incomePlanned, salary: salary, salaryDone: salary.length > 0, otherIncome: otherIncome, varios: varios, variosCount: variosList.length,
+    incomePlanned: incomePlanned, salary: salary, salaryDone: salaryDone, payFreq: payFreq, quincenas: quincenas, incomeLeft: incomeLeft, otherIncome: otherIncome, varios: varios, variosCount: variosList.length,
     fixed: fixed, fixedTotal: fixedTotal, aporteTotal: aporteTotal, fx: fx, quotas: quotas, quotaTotal: quotaTotal, cardsDue: cardsDue, cardTotal: cardTotal, cardOwn: cardOwn,
     final: r2(entry + income + otherIncome - fixedTotal - quotaTotal - cardOwn - varios)
   };
@@ -914,7 +958,7 @@ function go(to) { location.hash = '#' + to; }
 function row(o) {
   var attrs = o.a ? ' data-a="' + o.a + '"' + Object.keys(o.d || {}).map(function (k) { return ' data-' + k + '="' + esc(o.d[k]) + '"'; }).join('') : '';
   var tag = o.a ? 'button type="button"' : 'div';
-  return '<' + tag + ' class="row"' + attrs + '>' +
+  return '<' + tag + ' class="row' + (o.wrap ? ' wrap' : '') + '"' + attrs + '>' +
     (o.avatar ? '<span class="avatar" style="--bc:' + hashHue(o.avatar) + '">' + esc(initials(o.avatar)) + '</span>'
       : o.icon ? '<span class="bdg ' + (o.tone || '') + (o.sq ? ' sq' : '') + '"' + (o.color ? ' style="--bc:' + o.color + '"' : '') + '>' + ic(o.icon) + '</span>' : '') +
     '<span class="tx"><span class="t">' + o.t + '</span>' + (o.s ? '<span class="s">' + o.s + '</span>' : '') + '</span>' +
@@ -1016,7 +1060,18 @@ function vWelcome() {
 }
 
 function salaryRow(pc) {
-  var mo = pc.mo, done = pc.salaryDone;
+  var mo = pc.mo;
+  if (pc.payFreq === 'quincenal') {
+    return pc.quincenas.map(function (x) {
+      var done = !!x.paid, name = (x.q === 1 ? 'Primera' : 'Segunda') + ' quincena';
+      var sub = done ? 'Recibida el ' + fd(x.paid.date) + '. Toca para editar' : '¿Ya te pagaron? Marca el círculo o toca para otro valor';
+      return '<div class="row fxrow">' +
+        '<button type="button" class="tick' + (done ? ' on' : '') + '" data-a="salaryToggle" data-mo="' + mo + '" data-q="' + x.q + '" aria-label="' + (done ? 'Desmarcar ' : 'Marcar recibida ') + name + '">' + ic('check') + '</button>' +
+        '<button type="button" class="fxbody" data-a="salaryOpen" data-mo="' + mo + '" data-q="' + x.q + '"><span class="tx"><span class="t">' + name + '</span><span class="s">' + sub + '</span></span>' +
+        '<span class="amt pos">+' + money(x.amount) + '</span></button></div>';
+    }).join('');
+  }
+  var done = pc.salaryDone;
   var sub = done ? 'Recibido el ' + fd(pc.salary[0].date) + (pc.salary.length > 1 ? ' y ' + (pc.salary.length - 1) + ' pago más' : '') + '. Toca para editar'
     : '¿Ya te pagaron? Marca el círculo o toca para otro valor';
   return '<div class="row fxrow">' +
@@ -1036,7 +1091,7 @@ function vInicio(m) {
   var pc = planCalc(m, cM);
   var nM = addM(cM, 1), pn = planCalc(m, nM);
   var gotIncome = m.movs.filter(function (x) { return x.kind === 'ingreso' && ymOf(x.date) === cM && x.date >= m.start; }).reduce(function (t, x) { return t + (Number(x.amount) || 0); }, 0);
-  var incomeLeft = pc && !pc.salaryDone ? pc.incomePlanned : 0;
+  var incomeLeft = pc ? pc.incomeLeft : 0;
   var giveBack = 0;
   if (pc) pc.cardsDue.forEach(function (x) {
     if (x.s.pending <= 0.004) return;
@@ -1173,7 +1228,7 @@ function vPlan(m) {
     (pc.entryKind.indexOf('Estimado') === 0
       ? '<button type="button" class="lg lgb" data-a="planMonth" data-d="-1"><span class="op"></span><span class="lb">Saldo de entrada<small>Es el cierre estimado de ' + fmShort(addM(mo, -1)) + ': lo que te quedaría al terminar ese mes. Toca para ver cómo sale.</small></span><b>' + money(pc.entry) + '</b></button>'
       : '<div class="lg"><span class="op"></span><span class="lb">Saldo de entrada<small>' + esc(pc.entryKind) + '</small></span><b>' + money(pc.entry) + '</b></div>') +
-    '<div class="lg"><span class="op">+</span><span class="lb">Sueldo<small>' + (pc.salaryDone ? 'Recibido el ' + fd(pc.salary[0].date) : 'Previsto, aún no registrado') + '</small></span><b>' + money(pc.income) + '</b></div>' +
+    '<div class="lg"><span class="op">+</span><span class="lb">Sueldo<small>' + (pc.payFreq === 'quincenal' ? 'Quincenal: ' + pc.quincenas.filter(function (x) { return x.paid; }).length + ' de 2 recibidas' : (pc.salaryDone ? 'Recibido el ' + fd(pc.salary[0].date) : 'Previsto, aún no registrado')) + '</small></span><b>' + money(pc.income) + '</b></div>' +
     (pc.otherIncome ? '<div class="lg"><span class="op">+</span><span class="lb">Otros ingresos<small>Registrados en el mes</small></span><b>' + money(pc.otherIncome) + '</b></div>' : '') +
     '<div class="lg"><span class="op">−</span><span class="lb">Gastos fijos y aportes' + (pc.aporteTotal || pc.fx.skipCount ? '<small>' + [pc.aporteTotal ? 'Incluye ' + money(pc.aporteTotal) + ' a bolsillos' : '', pc.fx.skipCount ? pc.fx.skipCount + ' no aplica' + (pc.fx.skipCount > 1 ? 'n' : '') + ' este mes' : ''].filter(Boolean).join(', ') + '</small>' : '') + '</span><b>' + money(pc.fixedTotal) + '</b></div>' +
     '<div class="lg"><span class="op">−</span><span class="lb">Cuotas de deudas</span><b>' + money(pc.quotaTotal) + '</b></div>' +
@@ -1182,7 +1237,7 @@ function vPlan(m) {
     '<div class="lg res"><span class="op">=</span><span class="lb">Cierre estimado<small>Disponible, sin contar bolsillos</small></span><b class="' + (pc.final < 0 ? 'neg' : '') + '">' + money(pc.final, { html: true }) + '</b></div>' +
     '</div>';
   h += group('Ingreso y gastos fijos', (pc.incomePlanned > 0 || pc.salaryDone ? salaryRow(pc) : '') +
-    row({ a: 'incomeEdit', d: { mo: mo }, icon: 'in', tone: 'pos', t: 'Sueldo previsto', s: (pc.own ? 'Definido para ' + fmShort(mo) : (pc.plan ? 'Base de ' + fm(pc.plan.month) : 'Sin definir')) + (pc.salaryDone ? ', recibido ' + money(pc.income) : ''), amt: money(pc.incomePlanned) }) +
+    row({ a: 'incomeEdit', d: { mo: mo }, icon: 'in', tone: 'pos', t: 'Sueldo previsto', s: (pc.payFreq === 'quincenal' ? 'Quincenal, ' + money(r2(pc.incomePlanned / 2)) + ' cada una' : 'Mensual') + ', ' + (pc.own ? 'definido para ' + fmShort(mo) : (pc.plan ? 'base de ' + fm(pc.plan.month) : 'sin definir')), amt: money(pc.incomePlanned) }) +
     row({ a: 'go', d: { to: 'plan/fijos' }, icon: 'check', tone: pc.fx.count && !pc.fx.pendingCount ? 'pos' : 'acc', t: 'Gastos fijos', s: pc.fx.count ? pc.fx.paidCount + ' de ' + pc.fx.count + ' pagados' + (pc.fx.pendingCount ? ', faltan ' + money(pc.fx.pendingAmt) : '') : 'Aún no tienes gastos fijos', amt: money(pc.fixedTotal), chev: true }));
   if (pc.quotas.length) h += group('Cuotas de deudas', pc.quotas.map(function (x) {
     return row({ a: x.q.paid ? 'editMov' : 'payQuota', d: x.q.paid ? { id: x.q.paid.id } : { id: x.debt.id, k: x.q.k }, icon: x.q.paid ? 'check' : 'cal', tone: x.q.paid ? 'pos' : '', t: esc(x.debt.name) + (x.q.paid ? '<span class="tag ok">pagada</span>' : ''), s: 'Cuota ' + x.q.k + ' de ' + x.debt.sch.length + ', ' + fd(x.q.date), amt: money(x.q.amount) });
@@ -1381,7 +1436,7 @@ function vOwed(m) {
 function vDebts(m) {
   var act = m.debts.filter(function (d) { return !d.archived; }), arc = m.debts.filter(function (d) { return d.archived; });
   var h = group('Deudas activas', act.map(function (d) {
-    return row({ a: 'debt', d: { id: d.id }, icon: 'cal', tone: 'warn', t: esc(d.name), s: d.paidCount + ' de ' + d.sch.length + ' cuotas' + (d.next ? ', próxima ' + fd(d.next.date) : ', pagada'), amt: money(d.remaining), chev: true });
+    return row({ a: 'debt', d: { id: d.id }, icon: 'cal', tone: 'warn', t: esc(d.name) + (d.kind === 'credito' ? '<span class="tag">crédito ' + fmtRate(d.rate) + '% ' + (d.rateType === 'ea' ? 'EA' : 'MV') + '</span>' : ''), s: d.paidCount + ' de ' + d.sch.length + ' cuotas' + (d.next ? ', próxima ' + fd(d.next.date) + ' por ' + money(d.next.amount) : ', pagada'), amt: money(d.remaining), chev: true });
   }).join('') || emptyRow('Sin deudas. Las cuotas que agregues aparecen solas en próximos pagos y en el plan.'), link('Nueva', 'form', { kind: 'debt' }));
   if (arc.length) h += group('Archivadas', arc.map(function (d) { return row({ a: 'debt', d: { id: d.id }, icon: 'cal', t: esc(d.name), s: d.paidCount + ' de ' + d.sch.length + ' cuotas', amt: money(d.remaining), chev: true }); }).join(''));
   return h;
@@ -1544,7 +1599,7 @@ var FORMS = {
     var pc = planCalc(m, ymOf(r.date || todayStr()));
     var isSal = r.id || r.salary != null ? !!r.salary : !!(pc && !pc.salaryDone);
     return formWrap('ingreso', r.id ? 'Editar ingreso' : 'Nuevo ingreso', fAmount(r.amount, null, null, !r.id) + fText('desc', 'Descripción', r.desc || (isSal && !r.id ? 'Sueldo' : ''), 'Ej. salario') + fDate('date', r.date) +
-      fCheck('salary', 'Es mi sueldo del mes', isSal) + '<p class="hint">El sueldo reemplaza al previsto en el Plan. Otros ingresos se suman aparte. Si te pagan por quincenas, registra cada pago como sueldo.</p>',
+      fHidden('q', r.q) + fCheck('salary', 'Es mi sueldo del mes', isSal) + '<p class="hint">El sueldo reemplaza al previsto en el Plan. Otros ingresos se suman aparte. Si te pagan por quincenas, registra cada pago como sueldo.</p>',
       { id: r.id, del: r.id ? delBtn('mov:' + r.id) : '' });
   },
   a_bolsillo: function (r, m) { return pocketMove('a_bolsillo', r, m); },
@@ -1638,15 +1693,26 @@ var FORMS = {
   },
   debt: function (r, m) {
     var paid = r.id ? (m.debts.find(function (d) { return d.id === r.id; }) || {}).paidCount : 0;
+    var kind = r.kind === 'credito' ? 'credito' : 'cuotas';
     return formWrap('debt', r.id ? 'Editar deuda' : 'Nueva deuda',
-      fText('name', 'Nombre', r.name, 'Ej. Celular a cuotas') + fAmount(r.total, 'Valor total', 'total', !r.id) +
-      '<div class="two">' + fDate('first', r.first, 'Primer pago') + fNum('n', 'Cuotas', r.n || 12, 1, 600) + '</div>' +
-      fSelect('every', 'Frecuencia', FREQS, r.every || 1) +
+      fOpts('kind', [['cuotas', 'Cuotas fijas'], ['credito', 'Crédito con interés']], kind) +
+      fText('name', 'Nombre', r.name, 'Ej. Crédito libre inversión') +
+      fAmount(r.total, 'Valor total o monto prestado', 'total', !r.id) +
+      '<div data-show="kind=credito">' + fText('rate', 'Tasa de interés (%)', r.rate ? fmtRate(r.rate) : '', 'Ej. 1,8', ' inputmode="decimal"') +
+      '<div class="fld">' + '<div class="opts">' + [['mv', 'Mensual (MV)'], ['ea', 'Anual (EA)']].map(function (o) { return '<label><input type="radio" name="rateType" value="' + o[0] + '"' + ((r.rateType || 'mv') === o[0] ? ' checked' : '') + '><span>' + o[1] + '</span></label>'; }).join('') + '</div></div>' +
+      '<label class="amtbox" style="margin:0 0 10px"><span class="al">Seguro u otros cargos por cuota (opcional)</span><input name="ins" class="money-in" inputmode="decimal" autocomplete="off" placeholder="$0" value="' + esc(r.ins ? '$' + moneyInput(r.ins) : '') + '" style="font-size:28px"></label></div>' +
+      fNum('n', 'Número de cuotas', r.n || 12, 1, 600) + fDate('first', r.first, 'Primer pago') + fSelect('every', 'Frecuencia', FREQS, r.every || 1) +
+      '<p class="hint" id="debtInfo"></p>' +
       (paid ? '<p class="hint">Ya hay ' + paid + ' cuotas pagadas; esos pagos se conservan.</p>' : ''),
       { id: r.id, lead: 'Las cuotas aparecen solas en próximos pagos y en el plan.' });
   },
   income: function (r) {
-    return formWrap('income', 'Ingreso de ' + fmShort(r.mo), fHidden('mo', r.mo) + fAmount(r.amount, 'Ingreso previsto', null, true),
+    var fq = r.payFreq === 'quincenal' ? 'quincenal' : 'mensual';
+    var shown = fq === 'quincenal' ? r2((Number(r.amount) || 0) / 2) : r.amount;
+    return formWrap('income', 'Ingreso de ' + fmShort(r.mo), fHidden('mo', r.mo) +
+      '<p class="sec">¿Cada cuánto te pagan?</p>' + fOpts('payFreq', [['mensual', 'Mensual'], ['quincenal', 'Quincenal']], fq) +
+      fAmount(shown, fq === 'quincenal' ? 'Valor de cada quincena' : 'Ingreso del mes', null, true) +
+      '<p class="hint" data-show="payFreq=quincenal">Escribe lo que recibes en cada quincena. En el Plan aparecen dos pagos para marcar.</p>',
       { lead: 'Queda como base para ' + fmShort(r.mo) + ' y los meses siguientes.' });
   },
   fixed: function (r, m) {
@@ -1682,7 +1748,10 @@ var FORMS = {
   opening: function () {
     var start = ymOf(todayStr()) + '-01';
     return formWrap('opening', 'Crear apertura',
-      fDate('start', start, 'El libro empieza el') + fAmount(null, 'Saldo de la cuenta ese día', 'opening', true) + fAmount(null, 'Ingreso previsto del mes', 'income') +
+      fDate('start', start, 'El libro empieza el') + fAmount(null, 'Saldo de la cuenta ese día', 'opening', true) +
+      '<p class="sec">¿Cada cuánto te pagan?</p>' + fOpts('payFreq', [['mensual', 'Mensual'], ['quincenal', 'Quincenal']], 'mensual') +
+      fAmount(null, 'Ingreso (mensual, o de cada quincena)', 'income') +
+      '<p class="hint" data-show="payFreq=quincenal">Escribe lo que recibes en cada quincena: el mes suma las dos.</p>' +
       fText('pockets', 'Bolsillos, separados por coma', 'Ahorro', 'Ej. Ahorro, Viajes') +
       fText('cardName', 'Tarjeta principal', '', 'Ej. Visa. Vacío si no tienes') + '<div class="two">' + fNum('cut', 'Día de corte', 25, 1, 31) + fNum('pay', 'Día de pago', 15, 1, 31) + '</div>' +
       '<p class="hint">Los saldos de bolsillos se ajustan después desde Más, Bolsillos. Lo que debas de la tarjeta, regístralo como compras con fecha del ciclo anterior.</p>',
@@ -1732,7 +1801,8 @@ var SAVE = {
   ingreso: function (fd) {
     if (!needAmount(fd)) return false;
     var sal = !!fd.get('salary');
-    saveMov('ingreso', fd, { salary: sal, month: sal ? ymOf(fval(fd, 'date') || todayStr()) : null });
+    var qv = fval(fd, 'q'), prevI = S.get('mov:' + fval(fd, 'id')) || {};
+    saveMov('ingreso', fd, { salary: sal, month: sal ? (prevI.month || ymOf(fval(fd, 'date') || todayStr())) : null, q: sal && qv ? Number(qv) : null });
     return sal ? 'Sueldo registrado' : 'Ingreso guardado';
   },
   a_bolsillo: function (fd) { if (!needAmount(fd)) return false; if (!fval(fd, 'pocket')) return err('Elige un bolsillo.'); saveMov('a_bolsillo', fd, { pocket: fval(fd, 'pocket'), fixed: fval(fd, 'fixed') || null, month: fval(fd, 'month') || null }); return 'Movido al bolsillo'; },
@@ -1844,10 +1914,18 @@ var SAVE = {
     var total = needAmount(fd, 'total'); if (!total) return false;
     var first = fval(fd, 'first'); if (!first) return err('Elige la fecha del primer pago.');
     var id = fval(fd, 'id') || uid(), prev = S.get('debt:' + id) || {};
-    S.put('debt:' + id, Object.assign(prev, { id: id, name: name, total: total, first: first, n: toInt(fd.get('n'), 1, 1, 600), every: toInt(fd.get('every'), 1, 1, 12), archived: !!prev.archived, created: prev.created || Date.now() }));
+    var kind = fval(fd, 'kind') === 'credito' ? 'credito' : 'cuotas';
+    if (kind === 'credito' && !(parseRate(fd.get('rate'), 300) > 0)) return err('Escribe la tasa de interés del crédito.');
+    S.put('debt:' + id, Object.assign(prev, { id: id, kind: kind, name: name, total: total, first: first, n: toInt(fd.get('n'), 1, 1, 600), every: toInt(fd.get('every'), 1, 1, 12),
+      rate: kind === 'credito' ? parseRate(fd.get('rate'), 300) : null, rateType: kind === 'credito' ? (fval(fd, 'rateType') === 'ea' ? 'ea' : 'mv') : null,
+      ins: kind === 'credito' ? parseMoney(fd.get('ins')) : 0, archived: !!prev.archived, created: prev.created || Date.now() }));
     return 'Deuda guardada';
   },
-  income: function (fd) { var a = parseMoney(fd.get('amount')); editPlan(fval(fd, 'mo'), function (p) { p.income = a; }); return 'Ingreso actualizado'; },
+  income: function (fd) {
+    var fq = fval(fd, 'payFreq') === 'quincenal' ? 'quincenal' : 'mensual', a = parseMoney(fd.get('amount'));
+    editPlan(fval(fd, 'mo'), function (p) { p.payFreq = fq; p.income = fq === 'quincenal' ? r2(a * 2) : a; });
+    return 'Ingreso actualizado';
+  },
   fixed: function (fd) {
     var name = fval(fd, 'name'); if (!name) return err('Escribe el nombre del gasto fijo.');
     var a = needAmount(fd); if (!a) return false;
@@ -1885,7 +1963,8 @@ var SAVE = {
     });
     var cn = fval(fd, 'cardName');
     if (cn) { var cid = uid() + 'c'; ops.push(['put', 'card:' + cid, { id: cid, name: cn, cut: toInt(fd.get('cut'), 25, 1, 31), pay: toInt(fd.get('pay'), 15, 1, 31), order: 1, created: Date.now() }]); }
-    ops.push(['put', 'plan:' + ymOf(start), { month: ymOf(start), income: parseMoney(fd.get('income')), fixed: [] }]);
+    var fq0 = fval(fd, 'payFreq') === 'quincenal' ? 'quincenal' : 'mensual', inc0 = parseMoney(fd.get('income'));
+    ops.push(['put', 'plan:' + ymOf(start), { month: ymOf(start), payFreq: fq0, income: fq0 === 'quincenal' ? r2(inc0 * 2) : inc0, fixed: [] }]);
     S.tx(ops);
     return 'Apertura creada';
   },
@@ -1966,14 +2045,19 @@ function cxcDetail(id) {
 }
 function debtDetail(id) {
   var m = model(), d = m.debts.find(function (x) { return x.id === id; }); if (!d) return;
-  var pct = d.total ? Math.round(d.paidAmt / d.total * 100) : 0;
+  var pct = d.toPay ? Math.round(d.paidCount / d.sch.length * 100) : 0;
   var freq = (FREQS.find(function (f) { return f[0] === Number(d.every); }) || [1, 'Mensual'])[1];
+  var credit = d.kind === 'credito';
   var sch = d.sch.map(function (q) {
     var late = !q.paid && q.date < m.today;
-    return row({ a: q.paid ? 'editMov' : 'payQuota', d: q.paid ? { id: q.paid.id } : { id: d.id, k: q.k }, icon: q.paid ? 'check' : 'cal', tone: q.paid ? 'pos' : late ? 'neg' : '', t: 'Cuota ' + q.k + (q.paid ? '<span class="tag ok">pagada</span>' : late ? '<span class="tag warn">vencida</span>' : ''), s: fdLong(q.date), amt: money(q.paid ? q.paid.amount : q.amount) });
+    return row({ a: q.paid ? 'editMov' : 'payQuota', d: q.paid ? { id: q.paid.id } : { id: d.id, k: q.k }, icon: q.paid ? 'check' : 'cal', tone: q.paid ? 'pos' : late ? 'neg' : '', t: 'Cuota ' + q.k + (q.paid ? '<span class="tag ok">pagada</span>' : late ? '<span class="tag warn">vencida</span>' : ''),
+      wrap: credit, s: credit ? fd(q.date) + ': interés ' + money(q.int) + ', capital ' + money(q.cap) + ', queda ' + money(q.saldo) : fdLong(q.date), amt: money(q.paid ? q.paid.amount : q.amount) });
   }).join('');
-  openSheet('<h2>' + esc(d.name) + '</h2><p class="detail-n">' + money(d.remaining, { html: true }) + '</p><p class="lead" style="margin:0 0 10px">Por pagar de ' + money(d.total) + ', ' + freq.toLowerCase() + '</p>' +
-    '<div class="meter" style="margin:0 0 16px;height:8px"><i style="width:' + pct + '%"></i></div><div class="box">' + sch + '</div>' +
+  var info = credit
+    ? '<div class="box" style="padding:0 14px;margin-bottom:14px">' + kv('Monto prestado', money(d.total)) + kv('Tasa', fmtRate(d.rate) + '% ' + (d.rateType === 'ea' ? 'EA' : 'MV')) + kv('Cuota', money(d.sch[0] ? d.sch[0].amount : 0) + ' ' + freq.toLowerCase()) + kv('Intereses totales', money(d.sch.reduce(function (t, q) { return t + q.int; }, 0))) + kv('Saldo de capital', money(d.capital)) + '</div>'
+    : '';
+  openSheet('<h2>' + esc(d.name) + '</h2><p class="detail-n">' + money(d.remaining, { html: true }) + '</p><p class="lead" style="margin:0 0 10px">' + (credit ? 'Por pagar con intereses, de ' + money(d.toPay) + ' en total' : 'Por pagar de ' + money(d.total) + ', ' + freq.toLowerCase()) + '</p>' +
+    '<div class="meter" style="margin:0 0 16px;height:8px"><i style="width:' + pct + '%"></i></div>' + info + '<div class="box">' + sch + '</div>' +
     '<div class="actions"><button class="btn line" data-a="form" data-kind="debt" data-id="' + d.id + '">Editar</button><button class="btn line" data-a="debtArchive" data-id="' + d.id + '">' + (d.archived ? 'Restaurar' : 'Archivar') + '</button></div>' +
     (d.paidCount ? '' : '<p class="note">' + link('Borrar deuda', 'del', { k: 'debt:' + d.id }) + '</p>'));
 }
@@ -2266,7 +2350,7 @@ function openSheet(html) {
     var h2 = body.querySelector('h2');
     if (h2) { var wrap = document.createElement('div'); wrap.innerHTML = sheetHead(h2.innerHTML, null); h2.replaceWith(wrap.firstChild); }
   }
-  var f = $('#sheetBody form'); if (f) { applyShow(f); cuotasInfo(f); }
+  var f = $('#sheetBody form'); if (f) { applyShow(f); cuotasInfo(f); debtInfo(f); }
   var auto = $('#sheetBody [data-auto]'); if (auto) { try { auto.focus({ preventScroll: true }); } catch (e) { auto.focus(); } }
   $('.sheet').scrollTop = 0;
 }
@@ -2457,7 +2541,7 @@ var ACT = {
   payCard: function (d) { openForm('pago_tarjeta', { card: d.id, amount: d.amt ? Number(d.amt) : undefined }); },
   cardArchive: function (d) { var c = S.get('card:' + d.id); if (!c) return; c.archived = !c.archived; S.put('card:' + d.id, c); ui.cardId = null; closeSheet(); toast(c.archived ? 'Tarjeta archivada' : 'Tarjeta restaurada'); },
   payQuota: function (d) { openForm('cuota', { q: d.id + '|' + d.k }); },
-  incomeEdit: function (d) { var pc = planCalc(model(), d.mo); openForm('income', { mo: d.mo, amount: pc ? pc.income : 0 }); },
+  incomeEdit: function (d) { var pc = planCalc(model(), d.mo); openForm('income', { mo: d.mo, amount: pc ? pc.incomePlanned : 0, payFreq: pc ? pc.payFreq : 'mensual' }); },
   fixedNew: function (d) { openForm('fixed', { mo: d.mo }); },
   fixedEdit: function (d) { var pc = planCalc(model(), d.mo); var f = pc && pc.fixed.find(function (x) { return x.id === d.id; }); if (f) openForm('fixed', { mo: d.mo, f: f }); },
   fixedDel: function (d) {
@@ -2559,6 +2643,21 @@ var ACT = {
   bioOff: function () { ask('¿Desactivar Face ID? Seguirás entrando con tu PIN.', 'Desactivar').then(function (ok) { if (ok) { lsSet(BIO_KEY, null); toast('Face ID desactivado'); queueRender(); } }); },
   salaryToggle: function (d) {
     var m = model(), mo = d.mo, pc = planCalc(m, mo), cM = ymOf(m.today); if (!pc) return;
+    var dt = mo === cM ? m.today : (mo < cM ? (d.q === '1' ? mo + '-15' : lastDay(mo)) : m.today);
+    if (pc.payFreq === 'quincenal' && d.q) {
+      var x = pc.quincenas[Number(d.q) - 1], nm = (d.q === '1' ? 'primera' : 'segunda') + ' quincena';
+      if (x.paid) {
+        ask('¿Desmarcar la ' + nm + ' de ' + fmShort(mo) + '?\nSe borra el ingreso de ' + money(x.paid.amount) + ' del ' + fd(x.paid.date) + '.', 'Desmarcar', true).then(function (ok) {
+          if (ok) { S.del('mov:' + x.paid.id); toast('Quincena desmarcada'); }
+        });
+        return;
+      }
+      if (!(x.planned > 0)) return openForm('ingreso', { salary: true, q: Number(d.q), desc: 'Sueldo, ' + nm, date: dt });
+      var qid = uid();
+      S.put('mov:' + qid, { id: qid, kind: 'ingreso', date: dt, amount: x.planned, desc: 'Sueldo, ' + nm, salary: true, month: mo, q: Number(d.q), created: Date.now() });
+      toast(cap(nm) + ' registrada');
+      return;
+    }
     if (pc.salaryDone) {
       ask('¿Desmarcar el sueldo de ' + fmShort(mo) + '?\nSe borra el ingreso de ' + money(pc.income) + ' registrado el ' + fd(pc.salary[0].date) + '.', 'Desmarcar', true).then(function (ok) {
         if (!ok) return; S.tx(pc.salary.map(function (x) { return ['del', 'mov:' + x.id]; })); toast('Sueldo de ' + fmShort(mo) + ' desmarcado');
@@ -2572,6 +2671,11 @@ var ACT = {
   },
   salaryOpen: function (d) {
     var m = model(), mo = d.mo, pc = planCalc(m, mo), cM = ymOf(m.today); if (!pc) return;
+    if (pc.payFreq === 'quincenal' && d.q) {
+      var x = pc.quincenas[Number(d.q) - 1], nm = (d.q === '1' ? 'primera' : 'segunda') + ' quincena';
+      if (x.paid) return openForm('ingreso', S.get('mov:' + x.paid.id));
+      return openForm('ingreso', { amount: x.planned || null, desc: 'Sueldo, ' + nm, salary: true, q: Number(d.q), date: mo === cM ? m.today : (mo < cM ? (d.q === '1' ? mo + '-15' : lastDay(mo)) : m.today) });
+    }
     if (pc.salaryDone) return openForm('ingreso', S.get('mov:' + pc.salary[0].id));
     openForm('ingreso', { amount: pc.incomePlanned || null, desc: 'Sueldo', salary: true, date: mo === cM ? m.today : (mo < cM ? lastDay(mo) : m.today) });
   },
@@ -2747,6 +2851,22 @@ document.addEventListener('submit', function (e) {
   try { res = SAVE[name](fd, f); } catch (er) { console.error(er); return err('No se pudo guardar: ' + er.message); }
   if (res) { closeSheet(); if (typeof res === 'string') toast(res); }
 });
+function debtInfo(f) {
+  var el = f && f.querySelector('#debtInfo'); if (!el) return;
+  var g = function (n) { var x = f.querySelector('[name="' + n + '"]'); return x ? x.value : ''; };
+  var kind = (f.querySelector('[name="kind"]:checked') || {}).value || 'cuotas';
+  var total = parseMoney(g('total')), n = toInt(g('n'), 1, 1, 600), every = toInt(g('every'), 1, 1, 12);
+  var per = every === 1 ? 'mensual' : every === 12 ? 'anual' : 'cada ' + every + ' meses';
+  if (!total) { el.textContent = 'Escribe el valor para ver la cuota.'; return; }
+  if (kind !== 'credito') { el.textContent = n + ' cuotas de ' + money(Math.floor(total / n)) + ' (' + per + '), sin intereses.'; return; }
+  var rateType = (f.querySelector('[name="rateType"]:checked') || {}).value || 'mv';
+  var d = { rate: parseRate(g('rate'), 300), rateType: rateType, every: every };
+  if (!d.rate) { el.textContent = 'Escribe la tasa para calcular la cuota.'; return; }
+  var cp = creditPlan(total, n, debtRate(d), parseMoney(g('ins')));
+  var mv = rateType === 'ea' ? (Math.pow(1 + d.rate / 100, 1 / 12) - 1) * 100 : d.rate;
+  var ea = rateType === 'ea' ? d.rate : (Math.pow(1 + d.rate / 100, 12) - 1) * 100;
+  el.innerHTML = 'Cuota fija <b>' + money(cp.cuotaTotal) + '</b> ' + per + (parseMoney(g('ins')) ? ' (incluye el seguro)' : '') + '. Intereses en total ' + money(Math.round(cp.interest)) + '; pagarás ' + money(Math.round(cp.total)) + '. Tasa equivalente: ' + fmtRate(Math.round(mv * 1000) / 1000) + '% MV, ' + fmtRate(Math.round(ea * 100) / 100) + '% EA.';
+}
 function cuotasInfo(f) {
   var el = f && f.querySelector('#cuotasInfo'); if (!el) return;
   var n = toInt(f.querySelector('[name="cuotas"]').value, 1, 1, 48), a = parseMoney(f.querySelector('[name="amount"]').value);
@@ -2768,6 +2888,7 @@ function splitInfo(f) {
 document.addEventListener('input', function (e) {
   var t = e.target;
   if (t.form && (t.name === 'amount' || t.name === 'third' || t.name === 'cuotas')) setTimeout(function () { splitInfo(t.form); cuotasInfo(t.form); }, 0);
+  if (t.form && t.form.dataset.form === 'debt') setTimeout(function () { debtInfo(t.form); }, 0);
   if (t.classList && t.classList.contains('money-in')) {
     var v = t.value.replace(/[^\d,]/g, ''), i = v.indexOf(',');
     var ip = (i >= 0 ? v.slice(0, i) : v).replace(/^0+(?=\d)/, ''), dp = i >= 0 ? v.slice(i + 1).replace(/,/g, '').slice(0, 2) : null;
@@ -2784,7 +2905,12 @@ var CHANGE = {
 };
 document.addEventListener('change', function (e) {
   var t = e.target, f = t.form;
-  if (f) { applyShow(f); if (t.name === 'noInt' || t.name === 'card' || t.name === 'type') cuotasInfo(f); }
+  if (f) {
+    applyShow(f);
+    if (t.name === 'noInt' || t.name === 'card' || t.name === 'type') cuotasInfo(f);
+    if (t.name === 'payFreq' && f.dataset.form === 'income') { var al = f.querySelector('.amtbox .al'); if (al) al.textContent = t.value === 'quincenal' ? 'Valor de cada quincena' : 'Ingreso del mes'; }
+    if (f.dataset.form === 'debt') debtInfo(f);
+  }
   if (t.dataset && t.dataset.change && CHANGE[t.dataset.change]) CHANGE[t.dataset.change](t, f);
 });
 document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && sheetOpen) closeSheet(); });
